@@ -1,0 +1,345 @@
+// ==UserScript==
+// @name         LSS Fahrzeug-Übersicht
+// @namespace    https://www.leitstellenspiel.de/
+// @version      1.0.0
+// @description  Zeigt in der Leitstelle einen Tab mit einer tabellarischen Übersicht aller Fahrzeuge der zugehörigen Wachen inkl. FMS-Status (S1-S6)
+// @author       Grisu
+// @match        https://www.leitstellenspiel.de/buildings/*
+// @grant        GM_xmlhttpRequest
+// @connect      www.leitstellenspiel.de
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const TAB_ID   = 'grisu-fahrzeug-uebersicht';
+  const STYLE_ID = 'grisu-fahrzeug-style';
+  const LSS_BASE = 'https://www.leitstellenspiel.de';
+
+  // FMS-Status (Standard BOS-Funk, gilt auch für LSS)
+  const FMS_INFO = {
+    '1': { text: 'Frei Funk',        cls: 'badge-ok' },
+    '2': { text: 'Frei Wache',       cls: 'badge-ok' },
+    '3': { text: 'Alarmiert',        cls: 'badge-partial' },
+    '4': { text: 'Ankunft Einsatzort', cls: 'badge-partial' },
+    '5': { text: 'Sprechwunsch',     cls: 'badge-missing' },
+    '6': { text: 'Nicht einsatzbereit', cls: 'badge-none' },
+    '0': { text: 'Notruf',           cls: 'badge-missing' },
+  };
+
+  // ─── Hilfsfunktionen ───────────────────────────────────────────────────────
+
+  function fetchDoc(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: LSS_BASE + url,
+        responseType: 'document',
+        onload: r => {
+          if (r.response && r.response.querySelector) {
+            resolve(r.response);
+            return;
+          }
+          try {
+            const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
+            resolve(doc);
+          } catch (e) { reject(e); }
+        },
+        onerror: reject,
+      });
+    });
+  }
+
+  function getCurrentBuildingId() {
+    const m = location.pathname.match(/\/buildings\/(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ─── CSS ───────────────────────────────────────────────────────────────────
+
+  function injectStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const s = document.createElement('style');
+    s.id = STYLE_ID;
+    s.textContent = `
+#${TAB_ID}-panel { padding: 12px 4px; font-size: 13px; }
+#${TAB_ID}-panel .grisu-search {
+  width: 100%; max-width: 360px; margin-bottom: 12px; padding: 5px 10px;
+  border: 1px solid #999 !important; border-radius: 4px; font-size: 13px;
+  box-sizing: border-box; color: #222 !important; background: #fff !important;
+}
+#${TAB_ID}-panel .grisu-filter-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; align-items: center; }
+#${TAB_ID}-panel .grisu-btn-filter {
+  padding: 4px 12px; border-radius: 12px; border: 2px solid #222 !important;
+  background: #333 !important; color: #fff !important; cursor: pointer;
+  font-size: 12px; font-weight: 600 !important; white-space: nowrap;
+}
+#${TAB_ID}-panel .grisu-btn-filter:hover { background: #111 !important; border-color: #000 !important; }
+#${TAB_ID}-panel .grisu-btn-filter.active { background: #0066cc !important; color: #fff !important; border-color: #004499 !important; }
+#${TAB_ID}-panel .grisu-table-wrap { overflow-x: auto; }
+#${TAB_ID}-panel table.grisu-tbl { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 700px; }
+#${TAB_ID}-panel table.grisu-tbl th {
+  background: #e8e8e8 !important; color: #222 !important; border-bottom: 2px solid #bbb !important;
+  padding: 6px 8px; text-align: left; white-space: nowrap; font-weight: 600; cursor: pointer; user-select: none;
+}
+#${TAB_ID}-panel table.grisu-tbl th:hover { background: #d0d0d0 !important; color: #000 !important; }
+#${TAB_ID}-panel table.grisu-tbl td {
+  padding: 5px 8px; border-bottom: 1px solid #444 !important; vertical-align: middle;
+  color: #fff !important; background: #111 !important;
+}
+#${TAB_ID}-panel table.grisu-tbl tr:hover td { background: #1e1e2e !important; }
+#${TAB_ID}-panel .grisu-badge {
+  display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px;
+  font-weight: 600; white-space: nowrap;
+}
+#${TAB_ID}-panel .badge-ok      { background:#1e7e1e !important; color:#fff !important; border:1px solid #155715; }
+#${TAB_ID}-panel .badge-partial { background:#cc8800 !important; color:#fff !important; border:1px solid #996600; }
+#${TAB_ID}-panel .badge-missing { background:#cc2200 !important; color:#fff !important; border:1px solid #991a00; }
+#${TAB_ID}-panel .badge-none    { background:#555    !important; color:#fff !important; border:1px solid #333; }
+#${TAB_ID}-panel .grisu-loading { padding:20px; color:#333 !important; text-align:center; }
+#${TAB_ID}-panel .grisu-error   { padding:20px; color:#cc2200 !important; font-weight:600; }
+#${TAB_ID}-panel .grisu-summary { margin-bottom:10px; color:#333 !important; font-size:12px; }
+#${TAB_ID}-panel .grisu-link    { color:#66aaff !important; text-decoration:none; }
+#${TAB_ID}-panel .grisu-link:hover { text-decoration:underline; }
+#${TAB_ID}-panel .grisu-col-name { min-width:180px; }
+#${TAB_ID}-panel .grisu-col-wache { min-width:140px; }
+#${TAB_ID}-panel .sort-asc::after  { content:' ▲'; font-size:10px; }
+#${TAB_ID}-panel .sort-desc::after { content:' ▼'; font-size:10px; }
+`;
+    document.head.appendChild(s);
+  }
+
+  // ─── Tab einfügen ──────────────────────────────────────────────────────────
+
+  function findTabContainer() {
+    return document.querySelector('ul.nav-tabs');
+  }
+
+  function injectTab() {
+    const ul = findTabContainer();
+    if (!ul || document.getElementById(TAB_ID + '-tab')) return false;
+
+    const li = document.createElement('li');
+    li.innerHTML = `<a id="${TAB_ID}-tab" href="#${TAB_ID}-panel" data-toggle="tab">🚒 Fahrzeug-Übersicht</a>`;
+    ul.appendChild(li);
+
+    const tabContent = document.querySelector('.tab-content');
+    if (!tabContent) return false;
+
+    const panel = document.createElement('div');
+    panel.id = TAB_ID + '-panel';
+    panel.className = 'tab-pane';
+    panel.innerHTML = `<p class="grisu-loading">Tab anklicken zum Laden…</p>`;
+    tabContent.appendChild(panel);
+
+    let loaded = false;
+    document.getElementById(TAB_ID + '-tab').addEventListener('click', () => {
+      if (!loaded) { loaded = true; loadData(panel); }
+    });
+    return true;
+  }
+
+  // ─── Fahrzeugtabelle parsen ─────────────────────────────────────────────────
+
+  function parseVehicleTable(doc) {
+    const rows = [...doc.querySelectorAll('#vehicle_table tbody tr')];
+    return rows.map(tr => {
+      const tds = tr.querySelectorAll('td');
+      const img = tds[0] ? tds[0].querySelector('img') : null;
+      const typeLabel = img ? (img.getAttribute('alt') || '') : '';
+      const typeId    = img ? (img.getAttribute('vehicle_type_id') || '') : '';
+
+      const nameLink = tds[1] ? tds[1].querySelector('a[id^="vehicle_link_"]') : null;
+      const name = nameLink ? nameLink.textContent.trim() : (tds[1] ? tds[1].textContent.trim() : '');
+      const vehicleId = nameLink ? (nameLink.href.match(/\/vehicles\/(\d+)/) || [,''])[1] : '';
+
+      const fmsSpan = tds[2] ? tds[2].querySelector('span[class*="building_list_fms_"]') : null;
+      let fmsCode = '';
+      if (fmsSpan) {
+        const m = fmsSpan.className.match(/building_list_fms_(\d+)/);
+        fmsCode = m ? m[1] : fmsSpan.textContent.trim();
+      }
+
+      const buildingLink = tds[3] ? tds[3].querySelector('a') : null;
+      const buildingName = buildingLink ? buildingLink.textContent.trim() : (tds[3] ? tds[3].textContent.trim() : '');
+      const buildingHref = buildingLink ? buildingLink.getAttribute('href') : '';
+
+      const crew = tds[4] ? tds[4].textContent.trim() : '';
+
+      return { name, vehicleId, typeLabel, typeId, fmsCode, buildingName, buildingHref, crew };
+    });
+  }
+
+  // ─── Daten laden ───────────────────────────────────────────────────────────
+
+  async function loadData(panel) {
+    panel.innerHTML = `<p class="grisu-loading">⏳ Lade Fahrzeugdaten…</p>`;
+    const buildingId = getCurrentBuildingId();
+    try {
+      const doc = await fetchDoc(`/buildings/${buildingId}/leitstelle-vehicles`);
+      const vehicles = parseVehicleTable(doc);
+
+      if (vehicles.length === 0) {
+        panel.innerHTML = `<p class="grisu-error">Keine Fahrzeuge gefunden. Ist diese Seite eine Leitstelle mit zugeordneten Wachen?</p>`;
+        return;
+      }
+
+      renderTable(panel, vehicles);
+    } catch (e) {
+      panel.innerHTML = `<p class="grisu-error">Fehler: ${e.message || e}</p>`;
+    }
+  }
+
+  // ─── Tabelle rendern ───────────────────────────────────────────────────────
+
+  function renderTable(panel, vehicles) {
+    let searchVal  = '';
+    let filterMode = 'all';
+    let sortCol    = 'wache';
+    let sortDir    = 1;
+
+    function fmsInfo(code) {
+      return FMS_INFO[code] || { text: `FMS ${code || '?'}`, cls: 'badge-none' };
+    }
+
+    function filterVehicle(v) {
+      const hay = `${v.name} ${v.buildingName} ${v.typeLabel}`.toLowerCase();
+      if (searchVal && !hay.includes(searchVal.toLowerCase())) return false;
+      if (filterMode === 'all')        return true;
+      if (filterMode === 'free')       return v.fmsCode === '1' || v.fmsCode === '2';
+      if (filterMode === 'busy')       return v.fmsCode === '3' || v.fmsCode === '4';
+      if (filterMode === 'sprech')     return v.fmsCode === '5';
+      if (filterMode === 'notready')   return v.fmsCode === '6';
+      return true;
+    }
+
+    function sortVehicles(list) {
+      return [...list].sort((a, b) => {
+        let va, vb;
+        if (sortCol === 'wache')  { va = (a.buildingName || '').toLowerCase(); vb = (b.buildingName || '').toLowerCase(); }
+        else if (sortCol === 'name')  { va = (a.name || '').toLowerCase();         vb = (b.name || '').toLowerCase(); }
+        else if (sortCol === 'typ')   { va = (a.typeLabel || '').toLowerCase();     vb = (b.typeLabel || '').toLowerCase(); }
+        else if (sortCol === 'fms')   { va = parseInt(a.fmsCode, 10) || 0;          vb = parseInt(b.fmsCode, 10) || 0; }
+        else if (sortCol === 'crew')  { va = parseInt(a.crew, 10) || 0;             vb = parseInt(b.crew, 10) || 0; }
+        if (va < vb) return -sortDir;
+        if (va > vb) return  sortDir;
+        return 0;
+      });
+    }
+
+    function thCls(col) {
+      return sortCol === col ? (sortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
+    }
+
+    function render() {
+      const filtered = vehicles.filter(filterVehicle);
+      const sorted   = sortVehicles(filtered);
+
+      const countFree     = vehicles.filter(v => v.fmsCode === '1' || v.fmsCode === '2').length;
+      const countBusy      = vehicles.filter(v => v.fmsCode === '3' || v.fmsCode === '4').length;
+      const countSprech    = vehicles.filter(v => v.fmsCode === '5').length;
+      const countNotReady  = vehicles.filter(v => v.fmsCode === '6').length;
+
+      let html = `
+        <input class="grisu-search" type="text" placeholder="🔍 Fahrzeug, Wache oder Typ suchen…" value="${escHtml(searchVal)}" id="${TAB_ID}-search">
+        <div class="grisu-filter-row">
+          <span style="font-size:12px;color:#222;font-weight:700;margin-right:4px;">Filter:</span>
+          <button class="grisu-btn-filter ${filterMode==='all'?'active':''}"      data-filter="all">Alle (${vehicles.length})</button>
+          <button class="grisu-btn-filter ${filterMode==='free'?'active':''}"     data-filter="free">🟢 Frei (${countFree})</button>
+          <button class="grisu-btn-filter ${filterMode==='busy'?'active':''}"     data-filter="busy">🟠 Im Einsatz (${countBusy})</button>
+          <button class="grisu-btn-filter ${filterMode==='sprech'?'active':''}"   data-filter="sprech">🔴 Sprechwunsch (${countSprech})</button>
+          <button class="grisu-btn-filter ${filterMode==='notready'?'active':''}" data-filter="notready">⚫ Nicht einsatzbereit (${countNotReady})</button>
+        </div>
+        <div class="grisu-summary">${filtered.length} von ${vehicles.length} Fahrzeugen</div>
+        <div class="grisu-table-wrap">
+          <table class="grisu-tbl">
+            <thead><tr>
+              <th class="grisu-col-wache ${thCls('wache')}" data-col="wache">Wache</th>
+              <th class="grisu-col-name ${thCls('name')}"   data-col="name">Fahrzeug</th>
+              <th class="${thCls('typ')}"                   data-col="typ">Typ</th>
+              <th class="${thCls('fms')}"                   data-col="fms">FMS-Status</th>
+              <th class="${thCls('crew')}"                  data-col="crew">Besatzung (max.)</th>
+            </tr></thead>
+            <tbody>`;
+
+      for (const v of sorted) {
+        const info = fmsInfo(v.fmsCode);
+        html += `
+          <tr>
+            <td class="grisu-col-wache">${v.buildingHref ? `<a class="grisu-link" href="${escHtml(v.buildingHref)}" target="_blank">${escHtml(v.buildingName)}</a>` : escHtml(v.buildingName)}</td>
+            <td class="grisu-col-name">${v.vehicleId ? `<a class="grisu-link" href="/vehicles/${v.vehicleId}" target="_blank">${escHtml(v.name)}</a>` : escHtml(v.name)}</td>
+            <td>${escHtml(v.typeLabel || '–')}</td>
+            <td><span class="grisu-badge ${info.cls}">S${v.fmsCode || '?'} · ${escHtml(info.text)}</span></td>
+            <td style="text-align:center">${escHtml(v.crew || '–')}</td>
+          </tr>`;
+      }
+
+      html += `</tbody></table></div>`;
+
+      const activeEl = document.activeElement;
+      const activeId = activeEl && activeEl.id;
+      const selStart = activeEl && typeof activeEl.selectionStart === 'number' ? activeEl.selectionStart : null;
+      const selEnd   = activeEl && typeof activeEl.selectionEnd   === 'number' ? activeEl.selectionEnd   : null;
+
+      panel.innerHTML = html;
+
+      document.getElementById(`${TAB_ID}-search`).addEventListener('input', e => {
+        searchVal = e.target.value; render();
+      });
+      panel.querySelectorAll('.grisu-btn-filter').forEach(btn => {
+        btn.addEventListener('click', () => { filterMode = btn.dataset.filter; render(); });
+      });
+      panel.querySelectorAll('th[data-col]').forEach(th => {
+        th.addEventListener('click', () => {
+          const col = th.dataset.col;
+          if (sortCol === col) sortDir *= -1;
+          else { sortCol = col; sortDir = 1; }
+          render();
+        });
+      });
+
+      if (activeId) {
+        const el = document.getElementById(activeId);
+        if (el) {
+          el.focus();
+          if (selStart !== null && el.setSelectionRange) {
+            el.setSelectionRange(selStart, selEnd);
+          }
+        }
+      }
+    }
+
+    render();
+  }
+
+  // ─── Initialisierung ───────────────────────────────────────────────────────
+
+  function init() {
+    if (!location.pathname.startsWith('/buildings/')) return;
+    if (!/\/buildings\/\d+$/.test(location.pathname)) return;
+
+    const observer = new MutationObserver(() => {
+      if (findTabContainer()) {
+        observer.disconnect();
+        injectStyles();
+        injectTab();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    if (findTabContainer()) {
+      observer.disconnect();
+      injectStyles();
+      injectTab();
+    }
+  }
+
+  init();
+
+})();

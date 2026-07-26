@@ -1,0 +1,411 @@
+// ==UserScript==
+// @name         LSS Ausbildungscheck – Fahrzeugkauf
+// @namespace    https://www.leitstellenspiel.de/
+// @version      2.13
+// @description  Zeigt Ausbildungsstand der Wache auf der Kaufseite + markiert FZG rot wenn zu wenig Personal
+// @author       Grisu
+// @match        https://www.leitstellenspiel.de/buildings/*/vehicles/new
+// @run-at       document-idle
+// @grant        GM_addStyle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    GM_addStyle(`
+        #lss-ausbildungscheck {
+            background: #1a1a2e;
+            border: 1px solid #2d2d5e;
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-bottom: 16px;
+            font-family: 'Segoe UI', sans-serif;
+            color: #e8eaf6;
+            font-size: 13px;
+        }
+        #lss-ausbildungscheck h4 {
+            margin: 0 0 10px;
+            color: #90caf9;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #lss-ac-sub {
+            font-size: 11px;
+            color: #546e7a;
+            font-weight: normal;
+        }
+        #lss-ac-toggle {
+            background: none;
+            border: none;
+            color: #546e7a;
+            cursor: pointer;
+            font-size: 12px;
+            margin-left: auto;
+            padding: 0;
+        }
+        #lss-ac-toggle:hover { color: #90caf9; }
+        #lss-edu-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        #lss-edu-grid.collapsed { display: none; }
+        .lss-edu-badge {
+            background: #12122a;
+            border: 1px solid #2d2d5e;
+            border-radius: 6px;
+            padding: 5px 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #e8eaf6;
+        }
+        .lss-edu-count {
+            background: #1565c0;
+            color: #fff;
+            border-radius: 4px;
+            padding: 1px 7px;
+            font-weight: bold;
+            font-size: 12px;
+            min-width: 22px;
+            text-align: center;
+        }
+        .lss-loading { color: #78909c; font-style: italic; }
+        .lss-error   { color: #ef9a9a; }
+
+        /* Fahrzeug-Badges auf der Kaufseite */
+        .lss-fzg-badge {
+            display: inline-block;
+            background: #12122a;
+            border: 1px solid #2d2d5e;
+            border-radius: 4px;
+            padding: 1px 7px;
+            font-size: 11px;
+            font-weight: bold;
+            margin-left: 6px;
+            vertical-align: middle;
+            color: #e8eaf6;
+        }
+        .lss-fzg-warn { border-color: #7f1d1d; color: #fca5a5; }
+    `);
+
+    const pathMatch = location.pathname.match(/\/buildings\/(\d+)\/vehicles\/new/);
+    if (!pathMatch) return;
+    const buildingId = pathMatch[1];
+
+    // ── Box oben einfügen ──────────────────────────────────────────────
+    const box = document.createElement('div');
+    box.id = 'lss-ausbildungscheck';
+    box.innerHTML = `
+        <h4>
+            🎓 Ausbildungscheck
+            <span id="lss-ac-sub">Lade...</span>
+            <button id="lss-ac-refresh" type="button" style="background:#12122a;border:1px solid #3d3d7a;color:#90caf9;border-radius:5px;padding:2px 10px;cursor:pointer;font-size:12px;margin-left:8px;">↺ Aktualisieren</button>
+            <button id="lss-ac-toggle" type="button">▲ einklappen</button>
+        </h4>
+        <div id="lss-edu-grid"><span class="lss-loading">⏳ Lade Personal...</span></div>
+    `;
+    const insertTarget =
+        document.querySelector('h1')?.parentElement ||
+        document.querySelector('.container') ||
+        document.body;
+    insertTarget.prepend(box);
+
+    let collapsed = false;
+    document.getElementById('lss-ac-toggle').addEventListener('click', () => {
+        collapsed = !collapsed;
+        document.getElementById('lss-edu-grid').classList.toggle('collapsed', collapsed);
+        document.getElementById('lss-ac-toggle').textContent = collapsed ? '▼ ausklappen' : '▲ einklappen';
+    });
+
+    document.getElementById('lss-ac-refresh').addEventListener('click', () => {
+        document.getElementById('lss-edu-grid').innerHTML = '<span class="lss-loading">⏳ Aktualisiere...</span>';
+        // FZG-Badges zurücksetzen damit sie neu gezeichnet werden
+        document.querySelectorAll('.lss-fzg-badge').forEach(b => b.remove());
+        document.querySelectorAll('a[data-lss-checked]').forEach(a => delete a.dataset.lssChecked);
+        ladeDaten();
+    });
+
+    // ── Fehlende LSSM-Schooling-Einträge ──────────────────────────────
+    // Manche FZG haben in LSSM schooling:null obwohl sie Ausbildung brauchen
+    // Format: vehicle_type → { eduName (LSS-Personalname), min }
+    const MISSING_SCHOOLING = {
+        41:  { eduName: 'FGr E',                          min: 1 }, // MzGW (FGr N) = Fachgruppe Notversorgung/Elektroversorgung
+        122: { eduName: 'FGr E',                          min: 1 }, // LKW 7 Lbw (FGr E)
+        123: { eduName: 'Fachgruppe Wasserschaden/Pumpen',min: 1 }, // LKW 7 Lbw (FGr WP)
+        65:  { eduName: 'Fachgruppe Wassergefahren',      min: 1 }, // LKW 7 Lkr 19 tm
+        93:  { eduName: 'Rettungshundeführer (THW)',       min: 1 }, // MTW-O (Fachgruppe Ortung)
+        124: { eduName: 'GW-Wasserrettung',                 min: 1 }, // MTW-OV (individuelle Belegung Grisu)
+    };
+
+    // ── Ausbildungsname-Mapping ────────────────────────────────────────
+    // LSSM-Name → LSS-Personalname (aus schooling_personal_select)
+    const EDU_MAP = {
+        // Feuerwehr
+        'GW-Messtechnik Lehrgang':          'GW-Messtechnik',
+        'Höhenrettung Lehrgang':            'GW-Höhenrettung',
+        'Wechsellader Lehrgang':            'Wechsellader',
+        'GW-Taucher Lehrgang':              'GW-Taucher',
+        'GW-Wasserrettung Lehrgang':        'GW-Wasserrettung',
+        'Flugfeldlöschfahrzeug-Ausbildung': 'Flugfeldlöschfahrzeug',
+        'Rettungstreppen-Ausbildung':       'Rettungstreppen',
+        'Werkfeuerwehr-Ausbildung':         'Werkfeuerwehr',
+        'Feuerwehr-Verpflegungseinheit':    'Feuerwehr-Verpflegungseinheit',
+        'NEA200 Fortbildung':               'NEA200',
+        'Bahnrettung':                      'Bahnrettung',
+        // Rettungsdienst
+        'Notarzt-Ausbildung':               'Notarzt',
+        'LNA-Ausbildung':                   'LNA (Leitender Notarzt)',
+        'OrgL-Ausbildung':                  'OrgL',
+        'SEG - Einsatzleitung':             'Einsatzleitung (SEG)',
+        'SEG - GW-San':                     'GW-San',
+        'Betreuungsdienst':                 'Betreuungshelfer',
+        'Rettungshundeführer':              'Rettungshundeführer',
+        'Rettungshundeführer':              'Rettungshundeführer (SEG)',
+        'Höhenretter':                      'Höhenretter',
+        'Einsatzleiter Bergrettung':        'Einsatzleiter Bergrettung',
+        'Drohnenoperator':                  'Drohnenoperator',
+        'Verpflegungshelfer':               'Verpflegungshelfer',
+        'Windenoperator':                   'Windenoperator (RD)',
+        'Intensivpflege':                   'Intensivpflege',
+        // Polizei
+        'Zugführer (leBefKw)':              'Zugführer (Pol)',
+        'Hundertschaftsführer (FüKw)':      'Hundertschaftsführer',
+        'Polizeihubschrauber':              'Polizeihubschrauber',
+        'Hundeführer (Schutzhund)':         'Hundeführer',
+        'Motorradstaffel':                  'Motorradstaffel',
+        'Brandbekämpfung':                  'Brandbekämpfung (Pol)',
+        'Kriminalpolizei':                  'Kriminalpolizei',
+        'Dienstgruppenleitung':             'Dienstgruppenleitung',
+        'Reiterstaffel':                    'Reiterstaffel',
+        'SEK':                              'SEK',
+        'MEK':                              'MEK',
+        'Wasserwerfer':                     'Wasserwerfer',
+        'Lautsprecheroperator':             'Lautsprecheroperator',
+        // THW (LSS nutzt Abkürzungen!)
+        'Zugtrupp':                                 'Zugtrupp',
+        'Fachgruppe Räumen':                        'Fachgruppe Räumen',
+        'Fachgruppe Wassergefahren':                'Fachgruppe Wassergefahren',
+        'Fachgruppe Bergungstaucher':               'Fachgruppe Bergungstaucher',
+        'Fachgruppe Rettungshundeführer':           'Rettungshundeführer (THW)',
+        'Fachgruppe Wasserschaden/Pumpen':          'Fachgruppe Wasserschaden/Pumpen',
+        'Fachgruppe Schwere Bergung':               'FGr SB',
+        'Fachgruppe Elektroversorgung':             'FGr E',
+        'Trupp Unbemannte Luftfahrtsysteme':        'Tr UL',
+        'Fachzug Führung und Kommunikation':        'Fachzug Führung und Kommunikation',
+        // Seenotrettung
+        'Seenotretter':                             'Seenotretter',
+        'Hubschrauberpilot (Seenotrettung)':        'Hubschrauberpilot (Seenotrettung)',
+        'Wasserrettungsausbildung für Notfallsanitäter': 'Wasserrettungsausbildung Notfallsanitäter',
+        // Neu/Sonstige
+        'Technik und Sicherheit':                   'Technik und Sicherheit',
+        'Logistik-Verpflegung':                     'Logistik-Verpflegung',
+    };
+
+    function bereinige(name) {
+        return name.toLowerCase()
+            .replace(/lehrgang/g, '').replace(/ausbildung/g, '')
+            .replace(/fortbildung/g, '').replace(/^gw-/, '')
+            .replace(/[-_]/g, ' ').replace(/  +/g, ' ').trim();
+    }
+
+    function matchEduName(lssmName, personalName) {
+        // 1. Statisches Mapping
+        const mapped = EDU_MAP[lssmName];
+        if (mapped && mapped.toLowerCase() === personalName.toLowerCase()) return true;
+        // 2. Exakter Match
+        const a = lssmName.toLowerCase().trim();
+        const b = personalName.toLowerCase().trim();
+        if (a === b) return true;
+        // 3. Einer enthält den anderen
+        if (a.includes(b) || b.includes(a)) return true;
+        // 4. Bereinigter Match
+        const ac = bereinige(lssmName);
+        const bc = bereinige(personalName);
+        if (ac === bc || ac.includes(bc) || bc.includes(ac)) return true;
+        return false;
+    }
+
+    function findePersonalName(lssmEduName, ausgebildetGesamt) {
+        // Zuerst statisches Mapping prüfen
+        const mapped = EDU_MAP[lssmEduName];
+        if (mapped && ausgebildetGesamt[mapped] !== undefined) return mapped;
+        // Dann fuzzy
+        return Object.keys(ausgebildetGesamt).find(k => matchEduName(lssmEduName, k));
+    }
+
+    // ── Daten laden ────────────────────────────────────────────────────
+    function ladeDaten() {
+    Promise.all([
+        // 1. Wachenname
+        fetch(`/api/buildings/${buildingId}`)
+            .then(r => r.ok ? r.json() : {})
+            .catch(() => ({})),
+
+        // 2. Personal + Ausbildungen (via schooling_personal_select HTML)
+        fetch(`/buildings/${buildingId}/schooling_personal_select`)
+            .then(r => r.ok ? r.text() : '')
+            .catch(() => ''),
+
+        // 3. Vorhandene Fahrzeuge der Wache
+        fetch(`/api/buildings/${buildingId}/vehicles`)
+            .then(r => r.ok ? r.json() : [])
+            .catch(() => []),
+
+        // 4. LSSM Fahrzeugtypen (Ausbildungs-Mapping)
+        fetch('https://api.lss-manager.de/de_DE/vehicles')
+            .then(r => r.ok ? r.json() : {})
+            .catch(() => ({})),
+    ])
+    .then(([building, personalHtml, vorhandeneFzg, lssmVehicles]) => {
+        // Wachennamen setzen
+        document.getElementById('lss-ac-sub').textContent =
+            `– ${building.caption || 'Wache #' + buildingId}`;
+
+        // ── Ausbildungen aus HTML zählen ───────────────────────────────
+        const doc = new DOMParser().parseFromString(personalHtml, 'text/html');
+        const ausgebildetGesamt = {}; // eduName → Anzahl Personen
+        let personalCount = 0;
+
+        doc.querySelectorAll('[id^="school_personal_education_"]').forEach(span => {
+            personalCount++;
+            span.textContent.split(',').forEach(edu => {
+                edu = edu.trim();
+                if (edu) ausgebildetGesamt[edu] = (ausgebildetGesamt[edu] || 0) + 1;
+            });
+        });
+
+        // ── Gebundenes Personal durch vorhandene FZG berechnen ─────────
+        // Pro vorhandenem FZG: schooling-Ausbildung * staff.min abziehen
+        const gebunden = {}; // eduName → Anzahl gebunden
+        const nurEigene = vorhandeneFzg.filter(v => v.building_id === parseInt(buildingId));
+
+        nurEigene.forEach(fzg => {
+            const typ = lssmVehicles[fzg.vehicle_type];
+            const zugewiesen = (fzg.assigned_personnel_count != null && fzg.assigned_personnel_count > 0)
+                ? fzg.assigned_personnel_count
+                : 0;
+            if (zugewiesen === 0) return;
+
+            // LSSM hat schooling-Daten
+            if (typ && typ.schooling) {
+                Object.values(typ.schooling).forEach(lehrgaenge => {
+                    Object.keys(lehrgaenge).forEach(lssmEduName => {
+                        const personalName = findePersonalName(lssmEduName, ausgebildetGesamt);
+                        const key = personalName || lssmEduName;
+                        const verfuegbareFuerKey = ausgebildetGesamt[key] || 0;
+                        const abzug = Math.min(zugewiesen, verfuegbareFuerKey);
+                        gebunden[key] = (gebunden[key] || 0) + abzug;
+                    });
+                });
+            }
+
+            // Fehlende LSSM-Einträge aus eigener Map ergänzen
+            const missing = MISSING_SCHOOLING[fzg.vehicle_type];
+            if (missing) {
+                const key = missing.eduName;
+                const verfuegbareFuerKey = ausgebildetGesamt[key] || 0;
+                const abzug = Math.min(zugewiesen, verfuegbareFuerKey);
+                gebunden[key] = (gebunden[key] || 0) + abzug;
+            }
+        });
+
+        // ── Verfügbar = Gesamt - Gebunden (min. 0) ───────────────────────
+        const verfuegbar = {};
+        Object.entries(ausgebildetGesamt).forEach(([edu, count]) => {
+            verfuegbar[edu] = Math.max(0, count - (gebunden[edu] || 0));
+        });
+
+        // ── Ausbildungs-Box rendern ────────────────────────────────────
+        const grid = document.getElementById('lss-edu-grid');
+        const eintraege = Object.entries(ausgebildetGesamt)
+            .filter(([, n]) => n > 0)
+            .sort(([, a], [, b]) => b - a);
+
+        if (eintraege.length === 0) {
+            grid.innerHTML = '<span class="lss-loading">Keine Ausbildungen vorhanden.</span>';
+        } else {
+            grid.innerHTML = eintraege.map(([name, gesamt]) => {
+                const frei = verfuegbar[name] ?? gesamt;
+                const geb  = gebunden[name] || 0;
+                const tooltip = geb > 0
+                    ? `${gesamt} gesamt, ${geb} gebunden, ${frei} frei`
+                    : `${gesamt} gesamt`;
+                return `<div class="lss-edu-badge" title="${tooltip}">
+                    <span class="lss-edu-count">${frei}</span>
+                    <span>${name}</span>
+                    ${geb > 0 ? `<span style="color:#546e7a;font-size:11px;">(${gesamt}−${geb})</span>` : ''}
+                </div>`;
+            }).join('');
+        }
+
+        document.getElementById('lss-ac-sub').textContent +=
+            ` · ${personalCount} Personal · ${eintraege.length} Ausbildungsarten`;
+
+        // ── Fahrzeug-Kaufliste markieren ───────────────────────────────
+        // FZG-Links auf der Seite haben href="/vehicles/new?type=X" oder ähnlich
+        // Wir warten kurz bis Tabs geladen sind und markieren dann
+        markiereFahrzeuge(lssmVehicles, verfuegbar);
+
+        // Tab-Wechsel beobachten
+        const observer = new MutationObserver(() => markiereFahrzeuge(lssmVehicles, verfuegbar));
+        const tabContent = document.querySelector('.tab-content') || document.querySelector('#vehicle-buy-tabs');
+        if (tabContent) observer.observe(tabContent, { childList: true, subtree: true });
+    })
+    .catch(err => {
+        document.getElementById('lss-edu-grid').innerHTML =
+            `<span class="lss-error">❌ Fehler: ${err.message || err}</span>`;
+        console.error('[LSS Ausbildungscheck]', err);
+    });
+    } // end ladeDaten
+
+    ladeDaten();
+
+    // ── Fahrzeuge auf der Kaufseite markieren ──────────────────────────
+    function markiereFahrzeuge(lssmVehicles, verfuegbar) {
+        // FZG-Kauflinks: <a href="...?type=XX"> oder data-vehicle-type
+        document.querySelectorAll('a[href*="vehicle_type="], a[href*="type="]').forEach(link => {
+            if (link.dataset.lssChecked) return; // nicht doppelt markieren
+            link.dataset.lssChecked = '1';
+
+            const urlMatch = link.href.match(/[?&](?:vehicle_)?type=(\d+)/);
+            if (!urlMatch) return;
+            const typeId = urlMatch[1];
+            const typ = lssmVehicles[typeId];
+            if (!typ) return;
+
+            const badge = document.createElement('span');
+            badge.className = 'lss-fzg-badge';
+
+            if (!typ.schooling) {
+                // Kein Lehrgang nötig – gar kein Badge
+                return;
+            } else {
+                const minPersonal = typ.staff?.min || 1;
+                const teile = [];
+                let zuWenig = false;
+
+                Object.values(typ.schooling).forEach(lehrgaenge => {
+                    Object.keys(lehrgaenge).forEach(lssmEduName => {
+                        // Fuzzy-Match für Anzeige
+                        const personalName = Object.keys(verfuegbar).find(k => matchEduName(lssmEduName, k));
+                        const anzeigeNamen = personalName || lssmEduName;
+                        const frei = verfuegbar[anzeigeNamen] ?? 0;
+                        teile.push(`${anzeigeNamen}: ${frei}/${minPersonal}`);
+                        if (frei < minPersonal) zuWenig = true;
+                    });
+                });
+
+                badge.textContent = teile.join(' · ');
+                badge.title = teile.join('\n') + '\n(verfügbar/benötigt)';
+                if (zuWenig) badge.classList.add('lss-fzg-warn');
+            }
+
+            link.appendChild(badge);
+        });
+    }
+
+})();

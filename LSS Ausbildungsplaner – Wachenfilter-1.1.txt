@@ -1,0 +1,200 @@
+// ==UserScript==
+// @name         LSS Ausbildungsplaner – Wachenfilter
+// @namespace    https://www.leitstellenspiel.de/
+// @version      1.1
+// @description  Filtert Wachen-Panels auf Lehrgangsseiten nach Anzahl bereits Ausgebildeter
+// @author       Christian
+// @match        https://www.leitstellenspiel.de/buildings/*
+// @run-at       document-idle
+// @grant        GM_addStyle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // Nur auf Schulseiten mit Personalauswahl aktiv
+    // Warte bis der Ausbildungs-Mausschoner das Accordion gebaut hat
+    function init() {
+        const accordion = document.getElementById('accordion');
+        if (!accordion) return;
+
+        // Filter-Bar bereits vorhanden?
+        if (document.getElementById('lss-wachen-filter-bar')) return;
+
+        GM_addStyle(`
+            #lss-wachen-filter-bar {
+                background: #1a1a2e;
+                border: 1px solid #3d3d7a;
+                border-radius: 10px;
+                padding: 14px 18px;
+                margin-bottom: 14px;
+                font-family: 'Segoe UI', sans-serif;
+                color: #e8eaf6;
+                font-size: 13px;
+            }
+            #lss-wachen-filter-bar h4 {
+                margin: 0 0 10px;
+                color: #90caf9;
+                font-size: 14px;
+            }
+            .lss-frow {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-wrap: wrap;
+                margin-bottom: 8px;
+            }
+            .lss-frow label { color: #b0bec5; white-space: nowrap; }
+            .lss-fnumber {
+                width: 55px;
+                background: #12122a;
+                color: #e8eaf6 !important;
+                border: 1px solid #3d3d7a;
+                border-radius: 5px;
+                padding: 4px 8px;
+                text-align: center;
+                font-size: 13px;
+            }
+            .lss-fbtn {
+                background: #1565c0;
+                color: #fff;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 14px;
+                cursor: pointer;
+                font-size: 13px;
+                font-weight: bold;
+                transition: background 0.15s;
+            }
+            .lss-fbtn:hover { background: #1976d2; }
+            .lss-fbtn.reset { background: #37474f; }
+            .lss-fbtn.reset:hover { background: #546e7a; }
+            #lss-filter-stats {
+                color: #78909c;
+                font-size: 12px;
+                margin-top: 6px;
+            }
+            #lss-filter-stats b { color: #a5d6a7; }
+            .lss-panel-hidden { display: none !important; }
+        `);
+
+        // Filter-Bar einfügen – direkt VOR dem Accordion
+        const bar = document.createElement('div');
+        bar.id = 'lss-wachen-filter-bar';
+        bar.innerHTML = `
+            <h4>🔍 Wachenfilter</h4>
+            <div class="lss-frow">
+                <label>Wachen ausblenden mit</label>
+                <input id="lss-filter-min" type="number" class="lss-fnumber" value="1" min="0" max="999">
+                <label>oder mehr bereits Ausgebildeten</label>
+                <button id="lss-filter-apply" type="button" class="lss-fbtn">✔ Filtern</button>
+                <button id="lss-filter-reset" type="button" class="lss-fbtn reset">✕ Zurücksetzen</button>
+            </div>
+            <div id="lss-filter-stats">Filter noch nicht aktiv.</div>
+        `;
+        accordion.before(bar);
+
+        // Filter anwenden
+        document.getElementById('lss-filter-apply').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); applyFilter(); });
+        document.getElementById('lss-filter-reset').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); resetFilter(); });
+
+        // Auch bei späterer Eingabe mit Enter auslösen
+        document.getElementById('lss-filter-min').addEventListener('keydown', e => {
+            if (e.key === 'Enter') applyFilter();
+        });
+
+        // Wenn neue Panels geladen werden (Mausschoner lädt dynamisch nach)
+        // → Filter erneut anwenden falls aktiv
+        const observer = new MutationObserver(() => {
+            if (document.getElementById('lss-filter-apply').dataset.active === '1') {
+                applyFilter(null, true); // silent re-apply
+            }
+        });
+        observer.observe(accordion, { childList: true, subtree: true });
+    }
+
+    function getPanels() {
+        return Array.from(document.querySelectorAll('#accordion > .panel'));
+    }
+
+    function getAusgebildeteCount(panel) {
+        // Der Mausschoner zeigt in .personal-select-heading-building
+        // den Text "X Ausgebildete" oder einen Zähler
+        const span = panel.querySelector('.personal-select-heading-building');
+        if (!span) return null; // noch nicht geladen
+
+        const text = span.textContent || '';
+
+        // Format 1: "3 Ausgebildete" oder "3/10 Ausgebildete"
+        const match1 = text.match(/^(\d+)/);
+        if (match1) return parseInt(match1[1]);
+
+        // Format 2: Label mit Zahl (z.B. grünes Badge "3")
+        const match2 = text.match(/\d+/);
+        if (match2) return parseInt(match2[0]);
+
+        return 0;
+    }
+
+    function applyFilter(e, silent = false) {
+        const minVal = parseInt(document.getElementById('lss-filter-min').value);
+        if (isNaN(minVal)) return;
+
+        document.getElementById('lss-filter-apply').dataset.active = '1';
+
+        const panels = getPanels();
+        let sichtbar = 0;
+        let ausgeblendet = 0;
+        let nochNichtGeladen = 0;
+
+        panels.forEach(panel => {
+            const count = getAusgebildeteCount(panel);
+
+            if (count === null) {
+                // Noch nicht geladen – nicht ausblenden, nur zählen
+                panel.classList.remove('lss-panel-hidden');
+                nochNichtGeladen++;
+                sichtbar++;
+                return;
+            }
+
+            if (count >= minVal) {
+                panel.classList.add('lss-panel-hidden');
+                ausgeblendet++;
+            } else {
+                panel.classList.remove('lss-panel-hidden');
+                sichtbar++;
+            }
+        });
+
+        if (!silent) {
+            const stats = document.getElementById('lss-filter-stats');
+            stats.innerHTML =
+                `<b>${sichtbar}</b> Wachen sichtbar, ` +
+                `<b>${ausgeblendet}</b> ausgeblendet ` +
+                `(≥ ${minVal} Ausgebildete)` +
+                (nochNichtGeladen ? ` · <span style="color:#ffcc80">${nochNichtGeladen} noch nicht geladen</span>` : '');
+        }
+    }
+
+    function resetFilter() {
+        document.getElementById('lss-filter-apply').dataset.active = '0';
+        getPanels().forEach(p => p.classList.remove('lss-panel-hidden'));
+        document.getElementById('lss-filter-stats').innerHTML =
+            'Filter zurückgesetzt – alle Wachen sichtbar.';
+    }
+
+    // Warte auf den Mausschoner – der baut das Accordion asynchron
+    // Wir pollen bis es da ist (max. 15 Sekunden)
+    let versuche = 0;
+    const warte = setInterval(() => {
+        versuche++;
+        if (document.getElementById('accordion')) {
+            clearInterval(warte);
+            init();
+        } else if (versuche > 50) {
+            clearInterval(warte);
+        }
+    }, 300);
+
+})();

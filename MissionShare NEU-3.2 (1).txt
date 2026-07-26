@@ -1,0 +1,468 @@
+// ==UserScript==
+// @name         MissionShare NEU
+// @version      3.2
+// @description  Share missions with message
+// @author       You
+// @match        https://www.leitstellenspiel.de
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // Einsatznamen filtern Ã¢â‚¬â€œ nur Eins&auml;tze mit diesen Namen teilen
+    const filterByMission = false; //true - Filter wird benutzt -- false - Filter wird ignoriert
+    const allowedMissions = [
+        "Br&uuml;ckeneinsturz (Gro&szlig;;¸)",
+        "Br&uuml;ckeneinsturz (klein)",
+        "Einsturz Terminal",
+        "Damm droht zu brechen",
+        "Gasexplosion",
+        "Feuer auf Bauernhof - Gro&szlig;;¸",
+        "Gro&szlig;;¸brand in Museum",
+        "Brand bei Holzverarbeiter",
+        "Gro&szlig;;¸er Supermarkt eingest&uuml;rzt",
+        "Schwimmbaddach eingest&uuml;rzt",
+        "Brand auf Kompostieranlage",
+        "Havarie in Kl&auml;ranlage",
+        "Brand in Getreidesilo",
+        "Havariertes Flussfahrtschiff",
+        "Zusammensto&szlig;;¸ zweier Busse",
+        "Wassereinbruch Gro&szlig;;¸baustelle",
+        "Eingest&uuml;rztes Wohnhaus",
+        "Gew&auml;sser gekippt (Gro&szlig;;¸)",
+        "Versch&uuml;ttete Personen",
+    ];
+
+    // Freigabezeit filtern - nur Eins&auml;tze vor/nach Uhrzeit (UI gesteuert)
+    const filterByTime = false;
+
+    $("body")
+        .prepend(`
+        <div id="shMiModal" style="display: none;" class="modal fade">
+        <div role="document" class="modal-dialog" style="width: fit-content">
+            <div class="modal-content">
+
+                <!-- Header -->
+                <div class="modal-header">
+                    <h3>
+                        <center>Eins&auml;tze teilen</center>
+                    </h3>
+                </div>
+
+                <!-- Content -->
+                <br>
+                <table style="width: 90%; margin-left: 10px; margin-right: 10px" id="shMiSettingsV2">
+                    <style>
+                        body.dark tr {
+                            background-color: #505050;
+                        }
+
+                        .progress {
+                            margin-bottom: 0px;
+                        }
+
+                        td {
+                            padding: 2px;
+                        }
+
+                        .shMiMessage {
+                            width: 21ch;
+                            font: 11pt monospace;
+                        }
+
+                        .btn-shMiMessageRemove {
+                            font: 11pt monospace;
+                        }
+
+                        .btn-shMiMessageAdd {
+                            font: 11pt monospace;
+                        }
+                    </style>
+                    <tr>
+                        <td>
+                            <h4>Einstellungen</h4>
+                        </td>
+                    </tr>
+                    <tr title="Eins&auml;tze ab dieser Grenze werden freigegeben">
+                        <td>
+                            <strong>
+                                Credits:
+                            </strong>
+                        </td>
+                        <td></td>
+                        <td>
+                            <input type="number" id="shMiCredits" class="form-control" oninput="if (this.validity.badInput || (this.value.length >= 4 && this.value < 2500)) this.value = '2500'" min="2500">
+                        </td>
+                        <td></td>
+                    </tr>
+                    <tr title="Eins&auml;tze nach Uhrzeit filtern">
+                        <td>
+                            <strong>
+                                Uhrzeit:
+                            </strong>
+                        </td>
+                        <td>
+                            <select id="shMiTimeDirection" class="form-control" style="width:100px; height:30px; text-align:center;">
+                                <option value="before">Vor</option>
+                                <option value="after">Nach</option>
+                            </select>
+                        </td>
+                        <td>
+                            <input type="time" id="shMiTime" class="form-control" value="04:00">
+                        </td>
+                        <td></td>
+                    </tr>
+                    <tr class="shMiAddRowRow">
+                        <td colspan="3"></td>
+                        <td>
+                            <div class="btn btn-success btn-xs btn-shMiMessageAdd">+</div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <h4>Status</h4>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td colspan="2">
+                            <strong>
+                                Initialisieren:
+                            </strong>
+                        </td>
+                        <td>
+                            <div class="progress">
+                                <div class="progress-bar bg-success" role="progressbar" style="width: 0%" aria-valuenow="0"
+                                    aria-valuemin="0" aria-valuemax="100" id="shMiPrgsInitialize"></div>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td colspan="2">
+                            <strong>
+                                Teilen:
+                            </strong>
+                        </td>
+                        <td>
+                            <div class="progress">
+                                <div class="progress-bar bg-success" role="progressbar" style="width: 0%" aria-valuenow="0"
+                                    aria-valuemin="0" aria-valuemax="100" id="shMiPrgsShare"></div>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td colspan="2">
+                            <strong>
+                                R&uuml;ckmeldung:
+                            </strong>
+                        </td>
+                        <td>
+                            <div class="progress">
+                                <div class="progress-bar bg-success" role="progressbar" style="width: 0%" aria-valuenow="0"
+                                    aria-valuemin="0" aria-valuemax="100" id="shMiPrgsMessage"></div>
+                            </div>
+                        </td>
+                    </tr>
+                </table>
+                <br>
+
+                <!-- Footer -->
+                <div class="modal-footer">
+                    <button type="button" id="shMiShare" class="btn btn-success">Freigeben</button>
+                    <button type="button" class="btn btn-danger" data-dismiss="modal">Schlie&szlig;en</button>
+                </div>
+
+            </div>
+        </div>
+    </div>
+    `);
+
+    $("head").append(`<style>
+        .modal {
+              display: none;
+              position: fixed;
+              padding-top: 100px;
+              left: 0;
+              right:0;
+              top: 0;
+              bottom: 0;
+              overflow: auto;
+              background-color: rgb(0,0,0);
+              background-color: rgba(0,0,0,0.4);
+              z-index: 9999;
+        }
+        .modal-body{
+              height: 650px;
+              overflow-y: auto;
+        }
+    </style>`);
+
+    let insertPos = $("#missions")[0].firstChild
+
+    $(".mission-participation-filters").prepend(`<a href="#"
+        class="btn btn-xs btn-default"
+        id="shMiOpenModal"
+        data-toggle="modal"
+        data-target="#shMiModal"
+        class="glyphicon glyphicon-forward">
+        <span class="glyphicon glyphicon-forward"></span>&nbsp;
+    </a>`);
+
+    var missions = new Array;
+    const form = new FormData;
+
+    (async function () {
+        // migrate old settings
+        if (localStorage.shMiSettings && !localStorage.shMiSettingsV2) {
+            localStorage.setItem("shMiSettingsV2", JSON.stringify({ credits: JSON.parse(localStorage.shMiSettings).credits, messages: [{ c: true, m: JSON.parse(localStorage.shMiSettings).message}]}));
+            localStorage.removeItem('shMiSettings');
+        }
+        // initialize local storage
+        if (!localStorage.shMiSettingsV2) localStorage.setItem("shMiSettingsV2", JSON.stringify({ credits: 0, messages: [{ c: true, m: '' }], time: "04:00", timeDirection: "before" }));
+
+        const data = JSON.parse(localStorage.shMiSettingsV2);
+        $("#shMiCredits")[0].value = data.credits;
+        $("#shMiTime").val(data.time || "04:00");
+        $("#shMiTimeDirection").val(data.timeDirection || "before");
+        data.messages.forEach(message => {
+            addMessageRow(message.c, message.m);
+        });
+    })();
+
+    // Modal initial
+    $("body").on("shown.bs.modal", "#shMiModal", async function () {
+        missions = await updateShareableMissions();
+    });
+
+    // credits input event handler
+    $("body").on("change", "#shMiCredits", function () {
+        saveSettings();
+    });
+
+    $("body").on("change", "#shMiTime, #shMiTimeDirection", function () {
+        saveSettings();
+    });
+
+    // message input event handler
+    $("body").on("change", "#shMiMessage", function () {
+        saveSettings();
+    });
+
+    $("body").on("click", ".shMiMessageSelect", function () {
+        saveSettings();
+    });
+
+    // message input resizing
+    $("body").on("input", ".shMiMessage", function () {
+        setInputWidth();
+    });
+
+    function setInputWidth() {
+        const maxWidth = 128;
+        const minWidth = 25;
+
+        var maxCurrentWidth = 0;
+        const inputs = document.querySelectorAll('.shMiMessage');
+
+        inputs.forEach(input => {
+            const width = input.value.length + 4;
+            maxCurrentWidth = Math.max(maxCurrentWidth, width);
+        });
+
+        const clampedWidth = Math.min(Math.max(maxCurrentWidth, minWidth), maxWidth);
+
+        inputs.forEach(input => {
+            input.style.width = clampedWidth + 'ch';
+        });
+    }
+
+    $("body").on("click", ".btn-shMiMessageAdd", function () {
+        addMessageRow();
+    });
+
+    function addMessageRow(selected = false, text = "") {
+        $('.shMiAddRowRow').before(`
+        <tr class="shMiMessageRow">
+            <td></td>
+            <td>
+                <input class="shMiMessageSelect" type="radio" name="shMiReplySelect" ${(selected) ? 'checked="checked"' : ''}>
+            </td>
+            <td>
+                <input id="shMiMessage" class="shMiMessage form-control" value="${text}" title="Freilassen um keine Nachricht zu senden">
+            </td>
+            <td>
+                <div class="btn btn-danger btn-xs btn-shMiMessageRemove">-</div>
+            </td>
+        </tr>
+        `);
+
+        $('.shMiMessageRow:first td:first')[0].innerHTML = `<strong>Nachricht:</strong>`;
+
+        setInputWidth();
+        saveSettings();
+
+        if ($('.shMiMessageRow').length >= 10) {
+            $('.btn-shMiMessageAdd').addClass('hidden');
+        }
+    }
+
+    $("body").on("click", ".btn-shMiMessageRemove", function () {
+        removeMessageRow(this);
+    });
+
+    function removeMessageRow(btnElement) {
+        if ($('.shMiMessageRow').length > 1) {
+            $(btnElement).closest('tr').remove();
+        } else {
+            btnElement.value = '';
+        }
+
+        $('.shMiMessageRow:first td:first')[0].innerHTML = `<strong>Nachricht:</strong>`;
+
+        if (!$('.shMiMessageSelect:checked').length) {
+            $('.shMiMessageSelect:first').prop('checked', 'checked');
+        }
+
+        $('.btn-shMiMessageAdd').removeClass('hidden');
+
+        setInputWidth();
+        saveSettings();
+    }
+
+    // Share Button event handler
+    $("body").on("click", "#shMiShare", async function () {
+        this.setAttribute('disabled', 'disabled');
+        missions = await updateShareableMissions();
+        $("#shMiPrgsInitialize").attr("aria-valuemax", missions.length).css({ "width": 0 + "%" }).text(0 + " / " + missions.length.toLocaleString());
+        $("#shMiPrgsShare").attr("aria-valuemax", missions.length).css({ "width": 0 + "%" }).text(0 + " / " + missions.length.toLocaleString());
+        $("#shMiPrgsMessage").attr("aria-valuemax", missions.length).css({ "width": 0 + "%" }).text(0 + " / " + missions.length.toLocaleString());
+        await shareMissions(missions);
+    });
+
+    // Settings
+    function saveSettings() {
+        const dataArray = [];
+        document.querySelectorAll('.shMiMessageRow').forEach(row => {
+            const isSelected = row.querySelector('.shMiMessageSelect').checked;
+            const message = row.querySelector('.shMiMessage').value;
+
+            dataArray.push({
+                c: isSelected,
+                m: message
+            });
+        });
+
+        localStorage.setItem("shMiSettingsV2", JSON.stringify({
+            credits: $("#shMiCredits")[0].value,
+            messages: dataArray,
+            time: $("#shMiTime").val(),
+            timeDirection: $("#shMiTimeDirection").val()
+        }));
+    }
+
+    // Mission selection
+    async function updateShareableMissions() {
+        return Array.from($('#mission_list div.panel-default:not(.panel-success,.mission_panel_green)').parent()).filter(el => {
+            const raw = $(el).attr("data-sortable-by");
+            if (!raw) return false;
+            let parsed;
+            try {
+                parsed = JSON.parse(raw);
+            } catch (e) {
+                try {
+                    parsed = JSON.parse(raw.replace(/&quot;/g, '"'));
+                } catch {
+                    return false;
+                }
+            }
+
+            // Filter Credits
+            const creditsOk = parsed.average_credits >= Math.max($('#shMiCredits')[0].value, 0x9C4);
+
+            // Filter Einsatznamen
+            let missionOk = true;
+            if (filterByMission) {
+                missionOk = !allowedMissions.length || allowedMissions.includes(parsed.caption);
+            }
+
+            // Zeit-Filter
+            let timeOk = true;
+            if (filterByTime) {
+                const dataSortable = el.getAttribute("data-sortable-by");
+                if (dataSortable) {
+                    const parsed = JSON.parse(dataSortable.replace(/&quot;/g, '"'));
+                    const createdAt = new Date(parsed.created_at * 1000);
+
+                    const [h, m] = ($("#shMiTime").val() || "04:00").split(":");
+                    const todayLimit = new Date();
+                    todayLimit.setHours(Number(h), Number(m), 0, 0);
+
+                    const direction = $("#shMiTimeDirection").val() || "before";
+                    if (direction === "before") {
+                        timeOk = createdAt <= todayLimit;
+                    } else {
+                        timeOk = createdAt >= todayLimit;
+                    }
+                }
+            }
+
+            return creditsOk && missionOk && timeOk;
+        });
+    }
+
+    // Mission Share
+    async function shareMissions(missions) {
+        form.set('utf8', 'Ã¢Å“â€œ');
+        form.set('authenticity_token', $('meta[name="csrf-token"]').attr('content'));
+        form.set('mission_reply[alliance_chat]', '0');
+        form.set('mission_reply[content]', $('.shMiMessageRow:has(.shMiMessageSelect:checked) .shMiMessage')[0].value);
+        form.set('button', '');
+
+        var prgsInitialize = 0, prgsShare = 0, prgsMessage = 0;
+        const fetchPromises = [];
+
+        for (var i = 0; i < missions.length; i++) {
+            const m = missions[i];
+            prgsInitialize++;
+            var percentI = Math.round(prgsInitialize / missions.length * 100);
+            $('#shMiPrgsInitialize')
+                .attr("aria-valuenow", prgsInitialize)
+                .css({ "width": percentI + "%" })
+                .text(prgsInitialize + " / " + missions.length.toLocaleString());
+
+            fetchPromises.push(
+                $.get("https://www.leitstellenspiel.de/" + m.id.replace('_', 's/') + "/alliance").done(function () {
+                    prgsShare++;
+                    var percentS = Math.round(prgsShare / missions.length * 100);
+                    $('#shMiPrgsShare')
+                        .attr("aria-valuenow", prgsShare)
+                        .css({ "width": percentS + "%" })
+                        .text(prgsShare + " / " + missions.length.toLocaleString());
+
+                    if ($('#shMiMessage')[0].value != "") {
+                        form.set('mission_reply[mission_id]', m.id.replace('mission_', ''));
+                        fetch("https://www.leitstellenspiel.de/mission_replies", {
+                            method: 'POST',
+                            body: new URLSearchParams(form),
+                        }).then(function () {
+                            prgsMessage++;
+                            var percentM = Math.round(prgsMessage / missions.length * 100);
+                            $('#shMiPrgsMessage')
+                                .attr("aria-valuenow", prgsMessage)
+                                .css({ "width": percentM + "%" })
+                                .text(prgsMessage + " / " + missions.length.toLocaleString());
+                            if (document.querySelector('#shMiPrgsMessage').style.width === '100%') document.querySelector('#shMiShare').removeAttribute('disabled');
+                        });
+                    } else {
+                        $('#shMiPrgsMessage')
+                            .attr("aria-valuenow", missions.length.toLocaleString())
+                            .css({ "width": 100 + "%" })
+                            .text(missions.length.toLocaleString() + " / " + missions.length.toLocaleString());
+                    }
+                })
+            );
+        };
+        if (document.querySelector('#shMiPrgsMessage').style.width === '100%') document.querySelector('#shMiShare').removeAttribute('disabled');
+        await Promise.all(fetchPromises);
+    }
+
+})();

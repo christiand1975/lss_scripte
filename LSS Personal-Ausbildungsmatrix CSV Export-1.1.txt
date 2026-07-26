@@ -1,0 +1,190 @@
+// ==UserScript==
+// @name         LSS Personal-Ausbildungsmatrix CSV Export
+// @namespace    grisu.lss.tools
+// @version      1.1
+// @description  Exportiert eine CSV (Wache x Ausbildung) für alle Wachen der aktuell geöffneten Leitstelle
+// @author       Grisu
+// @match        https://www.leitstellenspiel.de/*
+// @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      leitstellenspiel.de
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const CONCURRENCY = 5; // Anzahl paralleler Requests
+
+    GM_registerMenuCommand('📊 Personal-Ausbildungsmatrix CSV exportieren', exportCSV);
+
+    async function exportCSV() {
+        console.log('[Ausbildungsmatrix] Start...');
+
+        const wachen = getWachenFromPage();
+        if (wachen.length === 0) {
+            alert('Keine Wachen auf dieser Seite gefunden. Bitte auf einer Seite mit Wachen-Links ausführen (z.B. Wachen-Übersicht).');
+            return;
+        }
+        console.log(`[Ausbildungsmatrix] ${wachen.length} Wachen gefunden.`);
+
+        const results = [];
+        let idx = 0;
+
+        async function worker() {
+            while (idx < wachen.length) {
+                const wache = wachen[idx++];
+                try {
+                    const personal = await fetchPersonal(wache.id);
+                    results.push({ wache, personal });
+                    console.log(`[Ausbildungsmatrix] (${results.length}/${wachen.length}) ${wache.name}: ${personal.length} Personen`);
+                } catch (e) {
+                    console.error(`[Ausbildungsmatrix] Fehler bei Wache ${wache.name} (${wache.id}):`, e);
+                    results.push({ wache, personal: [] });
+                }
+            }
+        }
+
+        await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+        // Reihenfolge wiederherstellen (worker füllen results asynchron/unsortiert)
+        results.sort((a, b) => wachen.indexOf(a.wache) - wachen.indexOf(b.wache));
+
+        const csv = buildCSV(results);
+        downloadCSV(csv);
+        console.log('[Ausbildungsmatrix] Fertig.');
+    }
+
+    // ---- Wachen von der aktuellen Seite einsammeln ----
+    function getWachenFromPage() {
+        const wachen = [];
+        const seen = new Set();
+        document.querySelectorAll('a[href*="/buildings/"]').forEach(a => {
+            const match = a.getAttribute('href').match(/\/buildings\/(\d+)/);
+            if (match) {
+                const id = match[1];
+                if (!seen.has(id)) {
+                    seen.add(id);
+                    const name = a.textContent.trim() || `Wache ${id}`;
+                    wachen.push({ id, name });
+                }
+            }
+        });
+        return wachen;
+    }
+
+    // ---- Personal je Wache laden ----
+    function fetchPersonal(buildingId) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://www.leitstellenspiel.de/buildings/${buildingId}/personals`,
+                onload: function (response) {
+                    try {
+                        resolve(parsePersonalResponse(response.responseText));
+                    } catch (e) {
+                        reject(e);
+                    }
+                },
+                onerror: reject
+            });
+        });
+    }
+
+    // /buildings/{id}/personals liefert die volle HTML-Seite mit der Tabelle
+    // #personal_table. Jede Zeile (tr) hat data-filterable-by="[...]" mit den
+    // internen Ausbildungscodes (z.B. "police_sek"), Spalte 3 enthält den
+    // Klarnamen (z.B. "SEK"). Ein Personal kann theoretisch mehrere
+    // Ausbildungen haben (Codes und Klarnamen werden dann Komma-getrennt
+    // erwartet und paarweise zugeordnet).
+    function parsePersonalResponse(text) {
+        const doc = new DOMParser().parseFromString(text, 'text/html');
+        const rows = doc.querySelectorAll('#personal_table tbody tr');
+        const result = [];
+        rows.forEach(row => {
+            let codes = [];
+            try {
+                codes = JSON.parse(row.getAttribute('data-filterable-by') || '[]');
+            } catch (e) { /* ignore, bleibt leer */ }
+
+            const cells = row.querySelectorAll('td');
+            const name = cells[1] ? cells[1].textContent.trim() : '';
+            const ausbildungText = cells[2] ? cells[2].textContent.trim() : '';
+
+            let labels = [];
+            if (codes.length > 0) {
+                const parts = ausbildungText.split(',').map(s => s.trim()).filter(Boolean);
+                if (parts.length === codes.length) {
+                    labels = parts;
+                } else if (ausbildungText) {
+                    labels = codes.map(() => ausbildungText);
+                } else {
+                    labels = codes; // Fallback: Code selbst als Label
+                }
+            }
+
+            const quals = codes.map((code, i) => ({ code, label: labels[i] || code }));
+            result.push({ name, quals });
+        });
+        return result;
+    }
+
+    // ---- CSV bauen ----
+    function buildCSV(results) {
+        // Code -> Label sammeln (erstes gesehenes Label gewinnt), Codes als
+        // eindeutige Spalten-Keys verwenden (Labels könnten theoretisch
+        // mehrdeutig sein, Codes sind es nicht).
+        const codeToLabel = new Map();
+        results.forEach(r => r.personal.forEach(p =>
+            (p.quals || []).forEach(q => {
+                if (!codeToLabel.has(q.code)) codeToLabel.set(q.code, q.label || q.code);
+            })
+        ));
+        const qualCodes = Array.from(codeToLabel.keys()).sort((a, b) =>
+            codeToLabel.get(a).localeCompare(codeToLabel.get(b), 'de')
+        );
+
+        const header = ['Wache', ...qualCodes.map(c => codeToLabel.get(c)), 'Ohne Ausbildung'];
+        const lines = [header.map(csvEscape).join(';')];
+
+        results.forEach(r => {
+            const counts = {};
+            qualCodes.forEach(c => (counts[c] = 0));
+            let ohneAusbildung = 0;
+
+            r.personal.forEach(p => {
+                if (!p.quals || p.quals.length === 0) {
+                    ohneAusbildung++;
+                } else {
+                    p.quals.forEach(q => {
+                        if (Object.prototype.hasOwnProperty.call(counts, q.code)) counts[q.code]++;
+                    });
+                }
+            });
+
+            const row = [r.wache.name, ...qualCodes.map(c => counts[c]), ohneAusbildung];
+            lines.push(row.map(csvEscape).join(';'));
+        });
+
+        return lines.join('\r\n');
+    }
+
+    function csvEscape(value) {
+        const str = String(value);
+        if (str.includes(';') || str.includes('"') || str.includes('\n')) {
+            return '"' + str.replace(/"/g, '""') + '"';
+        }
+        return str;
+    }
+
+    function downloadCSV(csv) {
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `lss_ausbildungsmatrix_${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+})();

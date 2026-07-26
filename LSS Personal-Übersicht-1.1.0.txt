@@ -1,0 +1,640 @@
+// ==UserScript==
+// @name         LSS Personal-Übersicht
+// @namespace    https://www.leitstellenspiel.de/
+// @version      1.1.0
+// @description  Zeigt in der Leitstelle einen Tab mit einer tabellarischen Personalübersicht aller zugehörigen Wachen (Ausbildungen, Status, Fahrzeugbindung) inkl. Ausbildungs-Schwellwert-Filter
+// @author       Grisu
+// @match        https://www.leitstellenspiel.de/buildings/*
+// @grant        GM_xmlhttpRequest
+// @connect      www.leitstellenspiel.de
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const TAB_ID   = 'grisu-personal-uebersicht';
+  const STYLE_ID = 'grisu-personal-style';
+  const LSS_BASE = 'https://www.leitstellenspiel.de';
+
+  // ─── Hilfsfunktionen ───────────────────────────────────────────────────────
+
+  function fetchJSON(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: LSS_BASE + url,
+        responseType: 'json',
+        onload: r => {
+          try {
+            const data = typeof r.response === 'object' ? r.response : JSON.parse(r.responseText);
+            resolve(data);
+          } catch (e) { reject(e); }
+        },
+        onerror: reject,
+      });
+    });
+  }
+
+  function fetchDoc(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: LSS_BASE + url,
+        responseType: 'document',
+        onload: r => {
+          if (r.response && r.response.querySelector) {
+            resolve(r.response);
+            return;
+          }
+          try {
+            const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
+            resolve(doc);
+          } catch (e) { reject(e); }
+        },
+        onerror: reject,
+      });
+    });
+  }
+
+  function getCurrentBuildingId() {
+    const m = location.pathname.match(/\/buildings\/(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ─── CSS ───────────────────────────────────────────────────────────────────
+
+  function injectStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const s = document.createElement('style');
+    s.id = STYLE_ID;
+    s.textContent = `
+#${TAB_ID}-panel {
+  padding: 12px 4px;
+  font-size: 13px;
+}
+#${TAB_ID}-panel .grisu-search {
+  width: 100%;
+  max-width: 360px;
+  margin-bottom: 12px;
+  padding: 5px 10px;
+  border: 1px solid #999 !important;
+  border-radius: 4px;
+  font-size: 13px;
+  box-sizing: border-box;
+  color: #222 !important;
+  background: #fff !important;
+}
+#${TAB_ID}-panel .grisu-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+  align-items: center;
+}
+#${TAB_ID}-panel .grisu-btn-filter {
+  padding: 4px 12px;
+  border-radius: 12px;
+  border: 2px solid #222 !important;
+  background: #333 !important;
+  color: #fff !important;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600 !important;
+  white-space: nowrap;
+}
+#${TAB_ID}-panel .grisu-btn-filter:hover { background: #111 !important; border-color: #000 !important; }
+#${TAB_ID}-panel .grisu-btn-filter.active { background: #0066cc !important; color: #fff !important; border-color: #004499 !important; }
+#${TAB_ID}-panel .grisu-table-wrap { overflow-x: auto; }
+#${TAB_ID}-panel table.grisu-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 700px;
+}
+#${TAB_ID}-panel table.grisu-tbl th {
+  background: #e8e8e8 !important;
+  color: #222 !important;
+  border-bottom: 2px solid #bbb !important;
+  padding: 6px 8px;
+  text-align: left;
+  white-space: nowrap;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+#${TAB_ID}-panel table.grisu-tbl th:hover { background: #d0d0d0 !important; color: #000 !important; }
+#${TAB_ID}-panel table.grisu-tbl td {
+  padding: 5px 8px;
+  border-bottom: 1px solid #444 !important;
+  vertical-align: top;
+  color: #fff !important;
+  background: #111 !important;
+}
+#${TAB_ID}-panel table.grisu-tbl tr.grisu-main-row:hover td { background: #1e1e2e !important; cursor: pointer; }
+#${TAB_ID}-panel table.grisu-tbl tr.grisu-detail-row td { background: #0a0a14 !important; }
+#${TAB_ID}-panel .grisu-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  margin: 1px 2px 1px 0;
+}
+#${TAB_ID}-panel .badge-ok      { background:#1e7e1e !important; color:#fff !important; border:1px solid #155715; }
+#${TAB_ID}-panel .badge-partial { background:#cc8800 !important; color:#fff !important; border:1px solid #996600; }
+#${TAB_ID}-panel .badge-missing { background:#cc2200 !important; color:#fff !important; border:1px solid #991a00; }
+#${TAB_ID}-panel .badge-none    { background:#555    !important; color:#fff !important; border:1px solid #333; }
+#${TAB_ID}-panel .badge-edu     { background:#2255aa !important; color:#fff !important; border:1px solid #163d78; }
+#${TAB_ID}-panel .grisu-badge-list { display:flex; flex-wrap:wrap; gap:2px; max-width:320px; }
+#${TAB_ID}-panel .grisu-loading  { padding:20px; color:#333 !important; text-align:center; }
+#${TAB_ID}-panel .grisu-error    { padding:20px; color:#cc2200 !important; font-weight:600; }
+#${TAB_ID}-panel .grisu-summary  { margin-bottom:10px; color:#333 !important; font-size:12px; }
+#${TAB_ID}-panel .grisu-link     { color:#66aaff !important; text-decoration:none; }
+#${TAB_ID}-panel .grisu-link:hover { text-decoration:underline; }
+#${TAB_ID}-panel .grisu-col-name { min-width:160px; }
+#${TAB_ID}-panel .sort-asc::after  { content:' ▲'; font-size:10px; }
+#${TAB_ID}-panel .sort-desc::after { content:' ▼'; font-size:10px; }
+#${TAB_ID}-panel .grisu-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+#${TAB_ID}-panel .grisu-detail-box {
+  background: #1a1a26 !important;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+#${TAB_ID}-panel .grisu-detail-box h4 {
+  margin: 0 0 6px 0;
+  font-size: 12px;
+  color: #ccc !important;
+  border-bottom: 1px solid #333;
+  padding-bottom: 4px;
+}
+#${TAB_ID}-panel .grisu-detail-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: #ddd !important;
+  padding: 1px 0;
+}
+#${TAB_ID}-panel .grisu-edufilter-toggle {
+  padding: 4px 12px;
+  border-radius: 12px;
+  border: 2px dashed #555 !important;
+  background: transparent !important;
+  color: #222 !important;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600 !important;
+  white-space: nowrap;
+}
+#${TAB_ID}-panel .grisu-edufilter-toggle:hover { background: #ddd !important; }
+#${TAB_ID}-panel .grisu-edufilter-toggle.active { background: #0066cc !important; color: #fff !important; border-color: #004499 !important; border-style: solid; }
+#${TAB_ID}-panel .grisu-edufilter-box {
+  background: #eee !important;
+  border: 1px solid #bbb;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+#${TAB_ID}-panel .grisu-edufilter-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #222 !important;
+}
+#${TAB_ID}-panel .grisu-edufilter-row input[type="checkbox"] { cursor: pointer; }
+#${TAB_ID}-panel .grisu-edufilter-row label { cursor: pointer; user-select: none; }
+#${TAB_ID}-panel .grisu-edufilter-min {
+  width: 44px;
+  padding: 2px 5px;
+  border: 1px solid #999 !important;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #222 !important;
+  background: #fff !important;
+}
+`;
+    document.head.appendChild(s);
+  }
+
+  // ─── Tab einfügen ──────────────────────────────────────────────────────────
+
+  function findTabContainer() {
+    return document.querySelector('ul.nav-tabs');
+  }
+
+  function injectTab() {
+    const ul = findTabContainer();
+    if (!ul || document.getElementById(TAB_ID + '-tab')) return false;
+
+    const li = document.createElement('li');
+    li.innerHTML = `<a id="${TAB_ID}-tab" href="#${TAB_ID}-panel" data-toggle="tab">👥 Personal-Übersicht</a>`;
+    ul.appendChild(li);
+
+    const tabContent = document.querySelector('.tab-content');
+    if (!tabContent) return false;
+
+    const panel = document.createElement('div');
+    panel.id = TAB_ID + '-panel';
+    panel.className = 'tab-pane';
+    panel.innerHTML = `<p class="grisu-loading">Tab anklicken zum Laden…</p>`;
+    tabContent.appendChild(panel);
+
+    let loaded = false;
+    document.getElementById(TAB_ID + '-tab').addEventListener('click', () => {
+      if (!loaded) { loaded = true; loadData(panel); }
+    });
+    return true;
+  }
+
+  // ─── Personal-Seite parsen ──────────────────────────────────────────────────
+
+  function parsePersonalsDoc(doc) {
+    const rows = [...doc.querySelectorAll('#personal_table tbody tr')];
+    return rows.map(tr => {
+      const tds = tr.querySelectorAll('td');
+      const name      = tds[1] ? tds[1].textContent.trim() : '';
+      const education  = tds[2] ? tds[2].textContent.trim() : '';
+      const boundTo   = tds[3] ? tds[3].textContent.trim() : '';
+      const statusEl  = tds[4] ? tds[4].querySelector('span') : null;
+      const status    = statusEl ? statusEl.textContent.trim() : (tds[4] ? tds[4].textContent.trim() : '');
+      return { name, education, boundTo, status };
+    });
+  }
+
+  function buildStats(personals) {
+    const stats = {
+      total: personals.length,
+      byStatus: {},
+      byEducation: {},
+      byVehicle: {},
+      unbound: 0,
+      noEducation: 0,
+      noEducationByStatus: {},
+    };
+    for (const p of personals) {
+      const st = p.status || 'Unbekannt';
+      stats.byStatus[st] = (stats.byStatus[st] || 0) + 1;
+
+      const edu = p.education || '';
+      if (edu) {
+        stats.byEducation[edu] = (stats.byEducation[edu] || 0) + 1;
+      } else {
+        stats.noEducation++;
+        stats.noEducationByStatus[st] = (stats.noEducationByStatus[st] || 0) + 1;
+      }
+
+      if (p.boundTo) {
+        stats.byVehicle[p.boundTo] = (stats.byVehicle[p.boundTo] || 0) + 1;
+      } else {
+        stats.unbound++;
+      }
+    }
+    return stats;
+  }
+
+  // ─── Daten laden ───────────────────────────────────────────────────────────
+
+  async function loadData(panel) {
+    panel.innerHTML = `<p class="grisu-loading">⏳ Lade Gebäudedaten…</p>`;
+    const buildingId = getCurrentBuildingId();
+    try {
+      const allBuildings = await fetchJSON('/api/buildings');
+      const leitstelleId = parseInt(buildingId, 10);
+
+      const LEIT_FIELDS = [
+        'leitstelle_building_id', 'leitstelle_id', 'assigned_leitstelle_id',
+        'dispatch_center_id', 'leitstellen_id', 'assigned_dispatch_center_building_id',
+      ];
+
+      const assigned = allBuildings.filter(b => {
+        if (b.id === leitstelleId) return false;
+        for (const f of LEIT_FIELDS) {
+          if (b[f] != null && parseInt(b[f], 10) === leitstelleId) return true;
+        }
+        return false;
+      });
+
+      if (assigned.length === 0) {
+        panel.innerHTML = `<p class="grisu-error">Keine zugeordneten Gebäude gefunden.<br>
+          Leitstellen-ID: <code>${leitstelleId}</code></p>`;
+        return;
+      }
+
+      panel.innerHTML = `<p class="grisu-loading">⏳ Lade Personal… (0/${assigned.length})</p>`;
+      const BATCH = 6;
+      const results = [];
+      let done = 0;
+      for (let i = 0; i < assigned.length; i += BATCH) {
+        const batch = assigned.slice(i, i + BATCH);
+        const batchResults = await Promise.all(batch.map(async b => {
+          try {
+            const doc = await fetchDoc(`/buildings/${b.id}/personals`);
+            const personals = parsePersonalsDoc(doc);
+            done++;
+            const pEl = panel.querySelector('p');
+            if (pEl) pEl.textContent = `⏳ Lade Personal… (${done}/${assigned.length})`;
+            return { id: b.id, caption: b.caption || `Gebäude #${b.id}`, personals, stats: buildStats(personals) };
+          } catch (e) {
+            done++;
+            return { id: b.id, caption: b.caption || `Gebäude #${b.id}`, personals: [], stats: buildStats([]), error: true };
+          }
+        }));
+        results.push(...batchResults);
+      }
+
+      renderTable(panel, results);
+    } catch (e) {
+      panel.innerHTML = `<p class="grisu-error">Fehler: ${e.message || e}</p>`;
+    }
+  }
+
+  // ─── Tabelle rendern ───────────────────────────────────────────────────────
+
+  function renderTable(panel, buildings) {
+    let searchVal  = '';
+    let filterMode = 'all';
+    let sortCol    = 'name';
+    let sortDir    = 1;
+    const expanded = new Set();
+
+    // Alle im Datensatz vorkommenden Ausbildungen einsammeln (einmalig)
+    const allEducations = [...new Set(
+      buildings.flatMap(b => Object.keys(b.stats.byEducation))
+    )].sort((a, b) => a.localeCompare(b, 'de'));
+
+    // Pro Ausbildung: aktiv? + Mindestanzahl, ab der eine Wache als "genug besetzt" gilt
+    const eduFilters = {};
+    for (const edu of allEducations) {
+      eduFilters[edu] = { active: false, min: 1 };
+    }
+    let eduFilterBoxOpen = false;
+
+    function statusRatio(b) {
+      const total = b.stats.noEducation;
+      if (total === 0) return 1;
+      const verf = b.stats.noEducationByStatus['Verfügbar'] || 0;
+      return verf / total;
+    }
+
+    function filterBuilding(b) {
+      const name = (b.caption || '').toLowerCase();
+      if (searchVal && !name.includes(searchVal.toLowerCase())) return false;
+      if (filterMode === 'problems' && !(statusRatio(b) < 1 && b.stats.total > 0)) return false;
+      if (filterMode === 'noeducation' && !(b.stats.noEducation > 0)) return false;
+      if (filterMode === 'unbound' && !(b.stats.unbound > 0)) return false;
+      if (filterMode === 'empty' && !(b.stats.total === 0)) return false;
+
+      // Ausbildungs-Schwellwert-Filter: zeige Wache nur, wenn sie bei mind. einer
+      // aktivierten Ausbildung NICHT die eingestellte Mindestanzahl erreicht
+      const activeEdu = allEducations.filter(edu => eduFilters[edu].active);
+      if (activeEdu.length > 0) {
+        const anyInsufficient = activeEdu.some(edu => {
+          const count = b.stats.byEducation[edu] || 0;
+          return count < eduFilters[edu].min;
+        });
+        if (!anyInsufficient) return false;
+      }
+
+      return true;
+    }
+
+    function sortBuildings(list) {
+      return [...list].sort((a, b) => {
+        let va, vb;
+        if (sortCol === 'name')      { va = (a.caption || '').toLowerCase(); vb = (b.caption || '').toLowerCase(); }
+        else if (sortCol === 'total')     { va = a.stats.total;            vb = b.stats.total; }
+        else if (sortCol === 'verfuegbar') { va = statusRatio(a);           vb = statusRatio(b); }
+        else if (sortCol === 'noeducation') { va = a.stats.noEducation;    vb = b.stats.noEducation; }
+        if (va < vb) return -sortDir;
+        if (va > vb) return  sortDir;
+        return 0;
+      });
+    }
+
+    function thCls(col) {
+      return sortCol === col ? (sortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
+    }
+
+    function educationBadges(stats) {
+      const entries = Object.entries(stats.byEducation).sort((a, b) => a[0].localeCompare(b[0], 'de'));
+      let html = entries.map(([edu, count]) =>
+        `<span class="grisu-badge badge-edu">${escHtml(edu)}: ${count}</span>`
+      ).join('');
+      if (stats.noEducation > 0) {
+        html += `<span class="grisu-badge badge-missing">Ohne Ausbildung: ${stats.noEducation}</span>`;
+      }
+      return html || `<span class="grisu-badge badge-none">–</span>`;
+    }
+
+    function statusBadge(b) {
+      const total = b.stats.noEducation;
+      if (total === 0) {
+        return b.stats.total === 0
+          ? `<span class="grisu-badge badge-none">Kein Personal</span>`
+          : `<span class="grisu-badge badge-ok">Alle ausgebildet</span>`;
+      }
+      const verf = b.stats.noEducationByStatus['Verfügbar'] || 0;
+      const ratio = verf / total;
+      const otherStatuses = Object.entries(b.stats.noEducationByStatus).filter(([s]) => s !== 'Verfügbar');
+      let cls = 'badge-ok';
+      if (ratio < 0.75) cls = 'badge-missing';
+      else if (ratio < 1) cls = 'badge-partial';
+      let html = `<span class="grisu-badge ${cls}">${verf}/${total} unausgeb. verfügbar</span>`;
+      for (const [st, count] of otherStatuses) {
+        html += `<span class="grisu-badge badge-partial">${escHtml(st)}: ${count}</span>`;
+      }
+      return html;
+    }
+
+    function renderDetail(b) {
+      const vehicleEntries = Object.entries(b.stats.byVehicle).sort((a, b2) => a[0].localeCompare(b2[0], 'de'));
+      const eduEntries = Object.entries(b.stats.byEducation).sort((a, b2) => a[0].localeCompare(b2[0], 'de'));
+      return `
+        <div class="grisu-detail-grid">
+          <div class="grisu-detail-box">
+            <h4>Zuordnung zu Fahrzeugen (${vehicleEntries.length})</h4>
+            ${vehicleEntries.length ? vehicleEntries.map(([veh, count]) =>
+              `<div class="grisu-detail-line"><span>${escHtml(veh)}</span><span>${count}</span></div>`
+            ).join('') : '<div class="grisu-detail-line"><span>Keine Zuordnungen</span></div>'}
+            ${b.stats.unbound > 0 ? `<div class="grisu-detail-line"><span>Ohne Fahrzeugbindung</span><span>${b.stats.unbound}</span></div>` : ''}
+          </div>
+          <div class="grisu-detail-box">
+            <h4>Ausbildungen (${eduEntries.length})</h4>
+            ${eduEntries.length ? eduEntries.map(([edu, count]) =>
+              `<div class="grisu-detail-line"><span>${escHtml(edu)}</span><span>${count}</span></div>`
+            ).join('') : '<div class="grisu-detail-line"><span>Keine</span></div>'}
+            ${b.stats.noEducation > 0 ? `<div class="grisu-detail-line" style="color:#ff6666 !important;"><span>Ohne Ausbildung</span><span>${b.stats.noEducation}</span></div>` : ''}
+          </div>
+          <div class="grisu-detail-box">
+            <h4>Status (unausgebildetes Personal)</h4>
+            ${Object.keys(b.stats.noEducationByStatus).length ? Object.entries(b.stats.noEducationByStatus).map(([st, count]) =>
+              `<div class="grisu-detail-line"><span>${escHtml(st)}</span><span>${count}</span></div>`
+            ).join('') : '<div class="grisu-detail-line"><span>Alle ausgebildet</span></div>'}
+          </div>
+        </div>`;
+    }
+
+    function render() {
+      const filtered = buildings.filter(filterBuilding);
+      const sorted   = sortBuildings(filtered);
+
+      const totalProblems    = buildings.filter(b => statusRatio(b) < 1 && b.stats.total > 0).length;
+      const totalNoEducation = buildings.filter(b => b.stats.noEducation > 0).length;
+      const totalUnbound     = buildings.filter(b => b.stats.unbound > 0).length;
+      const totalEmpty       = buildings.filter(b => b.stats.total === 0).length;
+
+      const activeEduCount = allEducations.filter(edu => eduFilters[edu].active).length;
+
+      let html = `
+        <input class="grisu-search" type="text" placeholder="🔍 Wache suchen…" value="${escHtml(searchVal)}" id="${TAB_ID}-search">
+        <div class="grisu-filter-row">
+          <span style="font-size:12px;color:#222;font-weight:700;margin-right:4px;">Filter:</span>
+          <button class="grisu-btn-filter ${filterMode==='all'?'active':''}"          data-filter="all">Alle (${buildings.length})</button>
+          <button class="grisu-btn-filter ${filterMode==='problems'?'active':''}"     data-filter="problems">⚠ Unterbesetzt/Krank (${totalProblems})</button>
+          <button class="grisu-btn-filter ${filterMode==='noeducation'?'active':''}"  data-filter="noeducation">Ohne Ausbildung vorhanden (${totalNoEducation})</button>
+          <button class="grisu-btn-filter ${filterMode==='unbound'?'active':''}"      data-filter="unbound">Nicht gebundenes Personal (${totalUnbound})</button>
+          <button class="grisu-btn-filter ${filterMode==='empty'?'active':''}"        data-filter="empty">Kein Personal (${totalEmpty})</button>
+          ${allEducations.length ? `<button class="grisu-edufilter-toggle ${eduFilterBoxOpen || activeEduCount ? 'active':''}" id="${TAB_ID}-edufilter-toggle">🎓 Ausbildungsfilter ${activeEduCount ? `(${activeEduCount})` : ''}</button>` : ''}
+        </div>
+        ${eduFilterBoxOpen ? `
+        <div class="grisu-edufilter-box">
+          ${allEducations.map((edu, i) => `
+            <div class="grisu-edufilter-row">
+              <input type="checkbox" id="${TAB_ID}-edu-active-${i}" data-edu="${escHtml(edu)}" ${eduFilters[edu].active ? 'checked' : ''}>
+              <label for="${TAB_ID}-edu-active-${i}">${escHtml(edu)} — mind.</label>
+              <input type="number" min="0" class="grisu-edufilter-min" id="${TAB_ID}-edu-min-${i}" data-edu-min="${escHtml(edu)}" value="${eduFilters[edu].min}">
+            </div>
+          `).join('')}
+        </div>` : ''}
+        <div class="grisu-summary">${filtered.length} von ${buildings.length} Gebäuden — Zeile anklicken für Details</div>
+        <div class="grisu-table-wrap">
+          <table class="grisu-tbl">
+            <thead><tr>
+              <th class="grisu-col-name ${thCls('name')}" data-col="name">Wache</th>
+              <th class="${thCls('total')}"                data-col="total">Gesamt</th>
+              <th class="${thCls('verfuegbar')}"            data-col="verfuegbar">Status</th>
+              <th class="${thCls('noeducation')}"           data-col="noeducation">Ausbildungen</th>
+            </tr></thead>
+            <tbody>`;
+
+      for (const b of sorted) {
+        const isOpen = expanded.has(b.id);
+        html += `
+          <tr class="grisu-main-row" data-bid="${b.id}">
+            <td class="grisu-col-name"><a class="grisu-link" href="/buildings/${b.id}" target="_blank">${escHtml(b.caption)}</a> ${b.error ? '⚠' : ''}</td>
+            <td>${b.stats.total}</td>
+            <td>${statusBadge(b)}</td>
+            <td><div class="grisu-badge-list">${educationBadges(b.stats)}</div></td>
+          </tr>`;
+        if (isOpen) {
+          html += `<tr class="grisu-detail-row" data-bid-detail="${b.id}"><td colspan="4">${renderDetail(b)}</td></tr>`;
+        }
+      }
+
+      html += `</tbody></table></div>`;
+
+      const activeEl = document.activeElement;
+      const activeId = activeEl && activeEl.id;
+      const selStart = activeEl && typeof activeEl.selectionStart === 'number' ? activeEl.selectionStart : null;
+      const selEnd   = activeEl && typeof activeEl.selectionEnd   === 'number' ? activeEl.selectionEnd   : null;
+
+      panel.innerHTML = html;
+
+      document.getElementById(`${TAB_ID}-search`).addEventListener('input', e => {
+        searchVal = e.target.value; render();
+      });
+      panel.querySelectorAll('.grisu-btn-filter').forEach(btn => {
+        btn.addEventListener('click', () => { filterMode = btn.dataset.filter; render(); });
+      });
+      panel.querySelectorAll('th[data-col]').forEach(th => {
+        th.addEventListener('click', () => {
+          const col = th.dataset.col;
+          if (sortCol === col) sortDir *= -1;
+          else { sortCol = col; sortDir = 1; }
+          render();
+        });
+      });
+      panel.querySelectorAll('.grisu-main-row').forEach(tr => {
+        tr.addEventListener('click', () => {
+          const bid = parseInt(tr.dataset.bid, 10);
+          if (expanded.has(bid)) expanded.delete(bid);
+          else expanded.add(bid);
+          render();
+        });
+      });
+
+      const eduToggleBtn = document.getElementById(`${TAB_ID}-edufilter-toggle`);
+      if (eduToggleBtn) {
+        eduToggleBtn.addEventListener('click', () => {
+          eduFilterBoxOpen = !eduFilterBoxOpen;
+          render();
+        });
+      }
+      panel.querySelectorAll('[data-edu]').forEach(cb => {
+        cb.addEventListener('change', e => {
+          eduFilters[cb.dataset.edu].active = e.target.checked;
+          render();
+        });
+      });
+      panel.querySelectorAll('[data-edu-min]').forEach(inp => {
+        inp.addEventListener('input', e => {
+          const v = parseInt(e.target.value, 10);
+          eduFilters[inp.dataset.eduMin].min = Number.isFinite(v) ? v : 0;
+          render();
+        });
+      });
+
+      if (activeId) {
+        const el = document.getElementById(activeId);
+        if (el) {
+          el.focus();
+          if (selStart !== null && el.setSelectionRange) {
+            try { el.setSelectionRange(selStart, selEnd); } catch (e) { /* type=number erlaubt keine Selection */ }
+          }
+        }
+      }
+    }
+
+    render();
+  }
+
+  // ─── Initialisierung ───────────────────────────────────────────────────────
+
+  function init() {
+    if (!location.pathname.startsWith('/buildings/')) return;
+    if (!/\/buildings\/\d+$/.test(location.pathname)) return;
+
+    const observer = new MutationObserver(() => {
+      if (findTabContainer()) {
+        observer.disconnect();
+        injectStyles();
+        injectTab();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    if (findTabContainer()) {
+      observer.disconnect();
+      injectStyles();
+      injectTab();
+    }
+  }
+
+  init();
+
+})();
