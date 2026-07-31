@@ -1,0 +1,564 @@
+// ==UserScript==
+// @name         LSS Leitstellen Wachen-Übersicht Version Alpha
+// @namespace    https://www.leitstellenspiel.de/
+// @version      2.2.0
+// @description  Zeigt in der Leitstelle einen Tab mit allen zugehörigen Wachen, deren Ausbauten, Personalstatus und Fahrzeug-Vollständigkeit
+// @author       Grisu
+// @match        https://www.leitstellenspiel.de/buildings/*
+// @grant        GM_xmlhttpRequest
+// @connect      www.leitstellenspiel.de
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const TAB_ID   = 'grisu-leitstelle-uebersicht';
+  const STYLE_ID = 'grisu-leitstelle-style';
+  const LSS_BASE = 'https://www.leitstellenspiel.de';
+
+  // ─── Hilfsfunktionen ───────────────────────────────────────────────────────
+
+  function fetchJSON(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: LSS_BASE + url,
+        responseType: 'json',
+        onload: r => {
+          try {
+            const data = typeof r.response === 'object' ? r.response : JSON.parse(r.responseText);
+            resolve(data);
+          } catch (e) { reject(e); }
+        },
+        onerror: reject,
+      });
+    });
+  }
+
+  // Lädt eine normale HTML-Gebäudeseite als parsbares Dokument
+  // (wird für "Fahrzeuge: X von maximal Y" benötigt, da das nicht
+  // in der /api/buildings/{id}-JSON-Antwort enthalten ist).
+  function fetchDoc(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: LSS_BASE + url,
+        responseType: 'document',
+        onload: r => {
+          if (r.response && r.response.querySelector) {
+            resolve(r.response);
+            return;
+          }
+          try {
+            const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
+            resolve(doc);
+          } catch (e) { reject(e); }
+        },
+        onerror: reject,
+      });
+    });
+  }
+
+  function getCurrentBuildingId() {
+    const m = location.pathname.match(/\/buildings\/(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  function getBuildingTypeName(type) {
+    // Zuordnung anhand der von der API gelieferten Icon-Dateinamen
+    // (building_type -> Icon), Stand: verifiziert an einer BePo-Wache.
+    // Einträge mit "(?)" nutzen ein wiederverwendetes Icon (z.B. selbes
+    // Polizeiwache-Bild wie Typ 6) -> Name ist eine plausible Annahme,
+    // aber nicht 1:1 bestätigt wie 6/9/11.
+    const map = {
+      0:  'Feuerwache',
+      1:  'Feuerwehrschule',
+      2:  'Rettungswache',
+      3:  'Rettungsschule',
+      4:  'Krankenhaus',
+      5:  'RTH-Station',
+      6:  'Polizeiwache',
+      7:  'Leitstelle',
+      8:  'Polizeischule',
+      9:  'THW-Ortsverband',
+      10: 'THW-Schule',
+      11: 'Bereitschaftspolizei (BePo)',
+      12: 'SEG',
+      13: 'Hubschrauberlandeplatz (Polizei)',
+      14: 'Bereitstellungsraum',
+      15: 'Wasserwacht',
+      16: 'Polizeiwache (groß) (?)',
+      17: 'Polizei-Sondereinheiten (SEK/MEK)',
+      18: 'Feuerwache (groß) (?)',
+      19: 'Bundespolizei-Wache (?)',
+      20: 'Rettungswache (groß) (?)',
+      21: 'Rettungshundestaffel',
+      22: 'Verbandsgebäude',
+      23: 'Verbandsgebäude (2) (?)',
+      24: 'Polizei-Reiterstaffel',
+      25: 'Bergrettung',
+      26: 'Seenotrettung',
+      27: 'Seenotrettungsschule',
+      28: 'Wasserrettungs-Hubschrauberlandeplatz',
+      29: 'Autobahnpolizei',
+    };
+    return map[type] || `Typ ${type}`;
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // Personal-Status auf Basis von personal_count / personal_count_target
+  function getPersonalStatus(b) {
+    const cur = b.personal_count || 0;
+    const tgt = b.personal_count_target || 0;
+    if (tgt === 0) return { cls: 'badge-none', text: `${cur} Personal`, title: 'Kein Ziel gesetzt' };
+    const ratio = cur / tgt;
+    if (ratio >= 1)    return { cls: 'badge-ok',      text: `${cur}/${tgt} ✓`,  title: 'Personal vollständig' };
+    if (ratio >= 0.75) return { cls: 'badge-partial',  text: `${cur}/${tgt} ⚠`, title: `${tgt - cur} fehlen noch` };
+    return               { cls: 'badge-missing',  text: `${cur}/${tgt} ✗`,  title: `${tgt - cur} Personal fehlen` };
+  }
+
+  // Fahrzeug-Vollständigkeit aus der Gebäude-HTML-Seite:
+  // "Fahrzeuge: X von maximal Y" (dt/dd-Paar), bei allen Wachentypen gleich aufgebaut.
+  function parseVehicleCounts(doc) {
+    const dts = [...doc.querySelectorAll('dt')];
+    const fzgDt = dts.find(dt => dt.textContent.trim().startsWith('Fahrzeuge:'));
+    if (!fzgDt) return { current: null, max: null };
+    const dd = fzgDt.nextElementSibling;
+    if (!dd) return { current: null, max: null };
+    const m = dd.textContent.match(/(\d+)\s+von\s+maximal\s+(\d+)/);
+    if (!m) return { current: null, max: null };
+    return { current: parseInt(m[1], 10), max: parseInt(m[2], 10) };
+  }
+
+  function getVehicleStatus(b) {
+    if (b.vehicle_current == null || b.vehicle_max == null) {
+      return { complete: false, known: false, text: '–' };
+    }
+    const complete = b.vehicle_max > 0 && b.vehicle_current >= b.vehicle_max;
+    return { complete, known: true, text: `${b.vehicle_current}/${b.vehicle_max}` };
+  }
+
+  // Ausbau-Badges: available / enabled
+  function getExtBadges(extensions) {
+    if (!extensions || extensions.length === 0) {
+      return `<span class="grisu-badge badge-noext">Keine Ausbauten</span>`;
+    }
+    return [...extensions].sort((a, b) => (a.caption || '').localeCompare(b.caption || '', 'de')).map(ext => {
+      if (!ext.available) {
+        return `<span class="grisu-badge badge-missing" title="Nicht gebaut">✗ ${escHtml(ext.caption)}</span>`;
+      }
+      if (!ext.enabled) {
+        return `<span class="grisu-badge badge-partial" title="Deaktiviert">⏸ ${escHtml(ext.caption)}</span>`;
+      }
+      return `<span class="grisu-badge badge-ok" title="Aktiv">✓ ${escHtml(ext.caption)}</span>`;
+    }).join('');
+  }
+
+  // Problemscore: fehlende/deaktivierte Ausbauten + Unterbesetzung + fehlende Fahrzeuge
+  function problemScore(b) {
+    let score = 0;
+    for (const ext of (b.extensions || [])) {
+      if (!ext.available) score += 2;
+      else if (!ext.enabled) score += 1;
+    }
+    const cur = b.personal_count || 0;
+    const tgt = b.personal_count_target || 0;
+    if (tgt > 0) {
+      const ratio = cur / tgt;
+      if (ratio < 0.75) score += 3;
+      else if (ratio < 1) score += 1;
+    }
+    if (b.vehicle_current != null && b.vehicle_max != null && b.vehicle_max > 0 && b.vehicle_current < b.vehicle_max) {
+      score += 1;
+    }
+    return score;
+  }
+
+  // ─── CSS ───────────────────────────────────────────────────────────────────
+
+  function injectStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const s = document.createElement('style');
+    s.id = STYLE_ID;
+    s.textContent = `
+#${TAB_ID}-panel {
+  padding: 12px 4px;
+  font-size: 13px;
+}
+#${TAB_ID}-panel .grisu-search {
+  width: 100%;
+  max-width: 360px;
+  margin-bottom: 12px;
+  padding: 5px 10px;
+  border: 1px solid #999 !important;
+  border-radius: 4px;
+  font-size: 13px;
+  box-sizing: border-box;
+  color: #222 !important;
+  background: #fff !important;
+}
+#${TAB_ID}-panel .grisu-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+  align-items: center;
+}
+#${TAB_ID}-panel .grisu-btn-filter {
+  padding: 4px 12px;
+  border-radius: 12px;
+  border: 2px solid #222 !important;
+  background: #333 !important;
+  color: #fff !important;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600 !important;
+  white-space: nowrap;
+}
+#${TAB_ID}-panel .grisu-btn-filter:hover {
+  background: #111 !important;
+  border-color: #000 !important;
+}
+#${TAB_ID}-panel .grisu-btn-filter.active {
+  background: #0066cc !important;
+  color: #fff !important;
+  border-color: #004499 !important;
+}
+#${TAB_ID}-panel .grisu-table-wrap {
+  overflow-x: auto;
+}
+#${TAB_ID}-panel table.grisu-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 680px;
+}
+#${TAB_ID}-panel table.grisu-tbl th {
+  background: #e8e8e8 !important;
+  color: #222 !important;
+  border-bottom: 2px solid #bbb !important;
+  padding: 6px 8px;
+  text-align: left;
+  white-space: nowrap;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+#${TAB_ID}-panel table.grisu-tbl th:hover { background: #d0d0d0 !important; color: #000 !important; }
+#${TAB_ID}-panel table.grisu-tbl td {
+  padding: 5px 8px;
+  border-bottom: 1px solid #444 !important;
+  vertical-align: middle;
+  color: #fff !important;
+  background: #111 !important;
+}
+#${TAB_ID}-panel table.grisu-tbl tr:hover td { background: #1e1e2e !important; }
+#${TAB_ID}-panel .grisu-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+#${TAB_ID}-panel .badge-ok      { background:#1e7e1e !important; color:#fff !important; border:1px solid #155715; }
+#${TAB_ID}-panel .badge-partial { background:#cc8800 !important; color:#fff !important; border:1px solid #996600; }
+#${TAB_ID}-panel .badge-missing { background:#cc2200 !important; color:#fff !important; border:1px solid #991a00; }
+#${TAB_ID}-panel .badge-none    { background:#555    !important; color:#fff !important; border:1px solid #333; }
+#${TAB_ID}-panel .badge-noext   { background:#888    !important; color:#fff !important; border:1px solid #666; }
+#${TAB_ID}-panel .grisu-ext-list { display:flex; flex-wrap:wrap; gap:4px; }
+#${TAB_ID}-panel .grisu-loading  { padding:20px; color:#333 !important; text-align:center; }
+#${TAB_ID}-panel .grisu-error    { padding:20px; color:#cc2200 !important; font-weight:600; }
+#${TAB_ID}-panel .grisu-summary  { margin-bottom:10px; color:#333 !important; font-size:12px; }
+#${TAB_ID}-panel .grisu-link     { color:#66aaff !important; text-decoration:none; }
+#${TAB_ID}-panel .grisu-link:hover { text-decoration:underline; }
+/* Wachenname grün, wenn kein Fahrzeug mehr fehlt (Ist >= Maximal) */
+#${TAB_ID}-panel .grisu-link-vehok { color:#3ecf3e !important; font-weight:700; }
+#${TAB_ID}-panel .grisu-col-name { min-width:160px; }
+#${TAB_ID}-panel .grisu-col-type { min-width:130px; }
+#${TAB_ID}-panel .sort-asc::after  { content:' ▲'; font-size:10px; }
+#${TAB_ID}-panel .sort-desc::after { content:' ▼'; font-size:10px; }
+`;
+    document.head.appendChild(s);
+  }
+
+  // ─── Tab einfügen ──────────────────────────────────────────────────────────
+
+  function findTabContainer() {
+    return document.querySelector('ul.nav-tabs');
+  }
+
+  function injectTab() {
+    const ul = findTabContainer();
+    if (!ul || document.getElementById(TAB_ID + '-tab')) return false;
+
+    const li = document.createElement('li');
+    li.innerHTML = `<a id="${TAB_ID}-tab" href="#${TAB_ID}-panel" data-toggle="tab">🏗 Wachen-Übersicht</a>`;
+    ul.appendChild(li);
+
+    const tabContent = document.querySelector('.tab-content');
+    if (!tabContent) return false;
+
+    const panel = document.createElement('div');
+    panel.id = TAB_ID + '-panel';
+    panel.className = 'tab-pane';
+    panel.innerHTML = `<p class="grisu-loading">Tab anklicken zum Laden…</p>`;
+    tabContent.appendChild(panel);
+
+    let loaded = false;
+    document.getElementById(TAB_ID + '-tab').addEventListener('click', () => {
+      if (!loaded) { loaded = true; loadData(panel); }
+    });
+    return true;
+  }
+
+  // ─── Daten laden ───────────────────────────────────────────────────────────
+
+  async function loadData(panel) {
+    panel.innerHTML = `<p class="grisu-loading">⏳ Lade Gebäudedaten…</p>`;
+    const buildingId = getCurrentBuildingId();
+    try {
+      const allBuildings = await fetchJSON('/api/buildings');
+      const leitstelleId = parseInt(buildingId, 10);
+
+      const LEIT_FIELDS = [
+        'leitstelle_building_id', 'leitstelle_id', 'assigned_leitstelle_id',
+        'dispatch_center_id', 'leitstellen_id', 'assigned_dispatch_center_building_id',
+      ];
+
+      const assigned = allBuildings.filter(b => {
+        if (b.id === leitstelleId) return false;
+        for (const f of LEIT_FIELDS) {
+          if (b[f] != null && parseInt(b[f], 10) === leitstelleId) return true;
+        }
+        return false;
+      });
+
+      if (assigned.length === 0) {
+        panel.innerHTML = `<p class="grisu-error">Keine zugeordneten Gebäude gefunden.<br>
+          Leitstellen-ID: <code>${leitstelleId}</code></p>`;
+        return;
+      }
+
+      // Gebäude-Details laden (vollständige extensions + Fahrzeug-Soll/Ist von der HTML-Seite)
+      panel.innerHTML = `<p class="grisu-loading">⏳ Lade Details… (0/${assigned.length})</p>`;
+      const BATCH = 10;
+      const buildings = [];
+      let done = 0;
+      for (let i = 0; i < assigned.length; i += BATCH) {
+        const batch = assigned.slice(i, i + BATCH);
+        const details = await Promise.all(batch.map(async b => {
+          try {
+            const [d, doc] = await Promise.all([
+              fetchJSON(`/api/buildings/${b.id}`),
+              fetchDoc(`/buildings/${b.id}`).catch(() => null),
+            ]);
+            if (doc) {
+              const vc = parseVehicleCounts(doc);
+              d.vehicle_current = vc.current;
+              d.vehicle_max = vc.max;
+            }
+            done++;
+            const pEl = panel.querySelector('p');
+            if (pEl) pEl.textContent = `⏳ Lade Details… (${done}/${assigned.length})`;
+            return d;
+          } catch {
+            done++;
+            return b;
+          }
+        }));
+        buildings.push(...details);
+      }
+
+      renderTable(panel, buildings);
+    } catch (e) {
+      panel.innerHTML = `<p class="grisu-error">Fehler: ${e.message || e}</p>`;
+    }
+  }
+
+  // ─── Tabelle rendern ───────────────────────────────────────────────────────
+
+  function renderTable(panel, buildings) {
+    let searchVal  = '';
+    let filterMode = 'all';
+    let sortCol    = 'name';
+    let sortDir    = 1;
+
+    function filterBuilding(b) {
+      const name = (b.caption || '').toLowerCase();
+      if (searchVal && !name.includes(searchVal.toLowerCase())) return false;
+      if (filterMode === 'all')          return true;
+      if (filterMode === 'problems')     return problemScore(b) > 0;
+      if (filterMode === 'missing-ext')  return (b.extensions || []).some(e => !e.available);
+      if (filterMode === 'understaffed') {
+        const cur = b.personal_count || 0;
+        const tgt = b.personal_count_target || 0;
+        return tgt > 0 && cur < tgt;
+      }
+      if (filterMode === 'missing-veh')  return getVehicleStatus(b).known && !getVehicleStatus(b).complete;
+      if (filterMode === 'veh-complete') return getVehicleStatus(b).known && getVehicleStatus(b).complete;
+      if (filterMode === 'no-ext')       return (b.extensions || []).length === 0;
+      return true;
+    }
+
+    function sortBuildings(list) {
+      return [...list].sort((a, b) => {
+        let va, vb;
+        if (sortCol === 'name')     { va = (a.caption || '').toLowerCase(); vb = (b.caption || '').toLowerCase(); }
+        else if (sortCol === 'type')     { va = a.building_type || 0;       vb = b.building_type || 0; }
+        else if (sortCol === 'ext')      { va = (a.extensions || []).length; vb = (b.extensions || []).length; }
+        else if (sortCol === 'personal') { va = a.personal_count || 0;      vb = b.personal_count || 0; }
+        else if (sortCol === 'vehicle')  { va = a.vehicle_current == null ? -1 : (a.vehicle_current - (a.vehicle_max || 0)); vb = b.vehicle_current == null ? -1 : (b.vehicle_current - (b.vehicle_max || 0)); }
+        else if (sortCol === 'problems') { va = problemScore(a);             vb = problemScore(b); }
+        if (va < vb) return -sortDir;
+        if (va > vb) return  sortDir;
+        return 0;
+      });
+    }
+
+    function thCls(col) {
+      return sortCol === col ? (sortDir === 1 ? 'sort-asc' : 'sort-desc') : '';
+    }
+
+    function render() {
+      const filtered = buildings.filter(filterBuilding);
+      const sorted   = sortBuildings(filtered);
+
+      const totalProblems     = buildings.filter(b => problemScore(b) > 0).length;
+      const totalUnderstaffed = buildings.filter(b => {
+        const cur = b.personal_count || 0;
+        const tgt = b.personal_count_target || 0;
+        return tgt > 0 && cur < tgt;
+      }).length;
+      const totalVehMissing   = buildings.filter(b => getVehicleStatus(b).known && !getVehicleStatus(b).complete).length;
+      const totalVehComplete  = buildings.filter(b => getVehicleStatus(b).known && getVehicleStatus(b).complete).length;
+
+      let html = `
+        <input class="grisu-search" type="text" placeholder="🔍 Wache suchen…" value="${escHtml(searchVal)}" id="${TAB_ID}-search">
+        <div class="grisu-filter-row">
+          <span style="font-size:12px;color:#222;font-weight:700;margin-right:4px;">Filter:</span>
+          <button class="grisu-btn-filter ${filterMode==='all'?'active':''}"          data-filter="all">Alle (${buildings.length})</button>
+          <button class="grisu-btn-filter ${filterMode==='problems'?'active':''}"     data-filter="problems">⚠ Probleme (${totalProblems})</button>
+          <button class="grisu-btn-filter ${filterMode==='understaffed'?'active':''}" data-filter="understaffed">👤 Unterbesetzt (${totalUnderstaffed})</button>
+          <button class="grisu-btn-filter ${filterMode==='missing-veh'?'active':''}"  data-filter="missing-veh">🚒 Fahrzeug fehlt (${totalVehMissing})</button>
+          <button class="grisu-btn-filter ${filterMode==='veh-complete'?'active':''}" data-filter="veh-complete">✅ Fahrzeuge komplett (${totalVehComplete})</button>
+          <button class="grisu-btn-filter ${filterMode==='missing-ext'?'active':''}"  data-filter="missing-ext">✗ Ausbau fehlt</button>
+          <button class="grisu-btn-filter ${filterMode==='no-ext'?'active':''}"       data-filter="no-ext">Keine Ausbauten</button>
+        </div>
+        <div class="grisu-summary">${filtered.length} von ${buildings.length} Gebäuden</div>
+        <div class="grisu-table-wrap">
+          <table class="grisu-tbl">
+            <thead><tr>
+              <th class="grisu-col-name ${thCls('name')}"    data-col="name">Wache</th>
+              <th class="grisu-col-type ${thCls('type')}"    data-col="type">Typ</th>
+              <th class="${thCls('ext')}"                    data-col="ext">Ausbauten</th>
+              <th class="${thCls('personal')}"               data-col="personal">Personal</th>
+              <th class="${thCls('vehicle')}"                data-col="vehicle">Fahrzeuge</th>
+              <th class="${thCls('problems')}"               data-col="problems">Status</th>
+            </tr></thead>
+            <tbody>`;
+
+      for (const b of sorted) {
+        const name  = b.caption || `Gebäude #${b.id}`;
+        const score = problemScore(b);
+        const ps    = getPersonalStatus(b);
+        const vs    = getVehicleStatus(b);
+
+        let statusBadge;
+        if (score === 0)     statusBadge = `<span class="grisu-badge badge-ok">✓ OK</span>`;
+        else if (score <= 2) statusBadge = `<span class="grisu-badge badge-partial">⚠ ${score} Problem${score > 1 ? 'e' : ''}</span>`;
+        else                 statusBadge = `<span class="grisu-badge badge-missing">✗ ${score} Probleme</span>`;
+
+        const nameLinkCls = vs.known && vs.complete ? 'grisu-link grisu-link-vehok' : 'grisu-link';
+        const nameTitle    = vs.known ? (vs.complete ? 'Alle Fahrzeug-Stellplätze belegt' : `${vs.text} Fahrzeuge – es fehlen noch`) : '';
+
+        let vehBadge;
+        if (!vs.known) vehBadge = `<span class="grisu-badge badge-none">–</span>`;
+        else if (vs.complete) vehBadge = `<span class="grisu-badge badge-ok" title="Vollständig">${vs.text} ✓</span>`;
+        else vehBadge = `<span class="grisu-badge badge-missing" title="Fahrzeuge fehlen">${vs.text} ✗</span>`;
+
+        html += `
+          <tr>
+            <td class="grisu-col-name"><a class="${nameLinkCls}" href="/buildings/${b.id}" target="_blank" title="${escHtml(nameTitle)}">${escHtml(name)}</a></td>
+            <td class="grisu-col-type">${escHtml(getBuildingTypeName(b.building_type))}</td>
+            <td><div class="grisu-ext-list">${getExtBadges(b.extensions)}</div></td>
+            <td style="text-align:center"><span class="grisu-badge ${ps.cls}" title="${escHtml(ps.title)}">${escHtml(ps.text)}</span></td>
+            <td style="text-align:center">${vehBadge}</td>
+            <td>${statusBadge}</td>
+          </tr>`;
+      }
+
+      html += `</tbody></table></div>`;
+
+      // ── FIX: Fokus & Cursorposition vor dem Re-Render merken ──
+      // Vorher: panel.innerHTML wurde bei JEDEM Tastendruck im Suchfeld neu
+      // gesetzt -> das <input> wurde als neues DOM-Element neu erzeugt und
+      // verlor dabei den Fokus. Ergebnis: man konnte nur einen Buchstaben
+      // tippen, bevor man wieder in die Box klicken musste.
+      const activeEl = document.activeElement;
+      const activeId = activeEl && activeEl.id;
+      const selStart = activeEl && typeof activeEl.selectionStart === 'number' ? activeEl.selectionStart : null;
+      const selEnd   = activeEl && typeof activeEl.selectionEnd   === 'number' ? activeEl.selectionEnd   : null;
+
+      panel.innerHTML = html;
+
+      document.getElementById(`${TAB_ID}-search`).addEventListener('input', e => {
+        searchVal = e.target.value; render();
+      });
+      panel.querySelectorAll('.grisu-btn-filter').forEach(btn => {
+        btn.addEventListener('click', () => { filterMode = btn.dataset.filter; render(); });
+      });
+      panel.querySelectorAll('th[data-col]').forEach(th => {
+        th.addEventListener('click', () => {
+          const col = th.dataset.col;
+          if (sortCol === col) sortDir *= -1;
+          else { sortCol = col; sortDir = 1; }
+          render();
+        });
+      });
+
+      // Fokus/Cursor wiederherstellen, damit man ununterbrochen weitertippen kann
+      if (activeId) {
+        const el = document.getElementById(activeId);
+        if (el) {
+          el.focus();
+          if (selStart !== null && el.setSelectionRange) {
+            el.setSelectionRange(selStart, selEnd);
+          }
+        }
+      }
+    }
+
+    render();
+  }
+
+  // ─── Initialisierung ───────────────────────────────────────────────────────
+
+  function init() {
+    if (!location.pathname.startsWith('/buildings/')) return;
+    if (!/\/buildings\/\d+$/.test(location.pathname)) return;
+
+    const observer = new MutationObserver(() => {
+      if (findTabContainer()) {
+        observer.disconnect();
+        injectStyles();
+        injectTab();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    if (findTabContainer()) {
+      observer.disconnect();
+      injectStyles();
+      injectTab();
+    }
+  }
+
+  init();
+
+})();
