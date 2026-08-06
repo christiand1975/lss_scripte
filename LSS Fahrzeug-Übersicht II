@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         LSS Fahrzeug-Übersicht
+// @name         LSS Fahrzeug-Uebersicht
 // @namespace    https://www.leitstellenspiel.de/
 // @version      1.1.0
-// @description  Zeigt in der Leitstelle einen Tab mit einer tabellarischen Übersicht aller Fahrzeuge der zugehörigen Wachen inkl. FMS-Status (S1-S6), sowie einen zweiten Tab mit einer Auswertung Fahrzeuge pro Wache
+// @description  Zeigt in der Leitstelle einen Tab mit einer tabellarischen Uebersicht aller Fahrzeuge der zugehÃ¶rigen Wachen inkl. FMS-Status (S1-S6), sowie einen zweiten Tab mit einer Auswertung Fahrzeuge pro Wache
 // @author       Grisu
 // @match        https://www.leitstellenspiel.de/buildings/*
 // @grant        GM_xmlhttpRequest
@@ -17,7 +17,7 @@
   const STYLE_ID  = 'grisu-fahrzeug-style';
   const LSS_BASE  = 'https://www.leitstellenspiel.de';
 
-  // FMS-Status (Standard BOS-Funk, gilt auch für LSS)
+  // FMS-Status (Standard BOS-Funk, gilt auch fÃ¼r LSS)
   const FMS_INFO = {
     '1': { text: 'Frei Funk',        cls: 'badge-ok' },
     '2': { text: 'Frei Wache',       cls: 'badge-ok' },
@@ -32,7 +32,7 @@
   let vehicleCache = null;
   let vehicleCachePromise = null;
 
-  // ─── Hilfsfunktionen ───────────────────────────────────────────────────────
+  // â”€â”€â”€ Hilfsfunktionen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function fetchDoc(url) {
     return new Promise((resolve, reject) => {
@@ -66,7 +66,7 @@
       .replace(/"/g, '&quot;');
   }
 
-  // ─── CSS ───────────────────────────────────────────────────────────────────
+  // â”€â”€â”€ CSS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function injectStyles() {
     if (document.getElementById(STYLE_ID)) return;
@@ -115,8 +115,8 @@
 #${TAB_ID}-panel .grisu-link:hover, #${TAB_ID2}-panel .grisu-link:hover { text-decoration:underline; }
 #${TAB_ID}-panel .grisu-col-name { min-width:180px; }
 #${TAB_ID}-panel .grisu-col-wache { min-width:140px; }
-#${TAB_ID}-panel .sort-asc::after, #${TAB_ID2}-panel .sort-asc::after  { content:' ▲'; font-size:10px; }
-#${TAB_ID}-panel .sort-desc::after, #${TAB_ID2}-panel .sort-desc::after { content:' ▼'; font-size:10px; }
+#${TAB_ID}-panel .sort-asc::after, #${TAB_ID2}-panel .sort-asc::after  { content:' â–²'; font-size:10px; }
+#${TAB_ID}-panel .sort-desc::after, #${TAB_ID2}-panel .sort-desc::after { content:' â–¼'; font-size:10px; }
 #${TAB_ID2}-panel .grisu-wache-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -133,7 +133,7 @@
     document.head.appendChild(s);
   }
 
-  // ─── Tabs einfügen ─────────────────────────────────────────────────────────
+  // â”€â”€â”€ Tabs einfÃ¼gen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function findTabContainer() {
     return document.querySelector('ul.nav-tabs');
@@ -144,7 +144,7 @@
     if (!ul || document.getElementById(TAB_ID + '-tab')) return false;
 
     const li = document.createElement('li');
-    li.innerHTML = `<a id="${TAB_ID}-tab" href="#${TAB_ID}-panel" data-toggle="tab">🚒 Fahrzeug-Übersicht</a>`;
+    li.innerHTML = `<a id="${TAB_ID}-tab" href="#${TAB_ID}-panel" data-toggle="tab">Fahrzeug-Uebersicht</a>`;
     ul.appendChild(li);
 
     const tabContent = document.querySelector('.tab-content');
@@ -153,7 +153,7 @@
     const panel = document.createElement('div');
     panel.id = TAB_ID + '-panel';
     panel.className = 'tab-pane';
-    panel.innerHTML = `<p class="grisu-loading">Tab anklicken zum Laden…</p>`;
+    panel.innerHTML = `<p class="grisu-loading">Tab anklicken zum Ladenâ€¦</p>`;
     tabContent.appendChild(panel);
 
     let loaded = false;
@@ -168,7 +168,7 @@
     if (!ul || document.getElementById(TAB_ID2 + '-tab')) return false;
 
     const li = document.createElement('li');
-    li.innerHTML = `<a id="${TAB_ID2}-tab" href="#${TAB_ID2}-panel" data-toggle="tab">🏠 Fahrzeuge pro Wache</a>`;
+    li.innerHTML = `<a id="${TAB_ID2}-tab" href="#${TAB_ID2}-panel" data-toggle="tab">Fahrzeuge pro Wache</a>`;
     ul.appendChild(li);
 
     const tabContent = document.querySelector('.tab-content');
@@ -177,7 +177,7 @@
     const panel = document.createElement('div');
     panel.id = TAB_ID2 + '-panel';
     panel.className = 'tab-pane';
-    panel.innerHTML = `<p class="grisu-loading">Tab anklicken zum Laden…</p>`;
+    panel.innerHTML = `<p class="grisu-loading">Tab anklicken zum Ladenâ€¦</p>`;
     tabContent.appendChild(panel);
 
     let loaded = false;
@@ -187,7 +187,7 @@
     return true;
   }
 
-  // ─── Fahrzeugtabelle parsen ─────────────────────────────────────────────────
+  // â”€â”€â”€ Fahrzeugtabelle parsen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function parseVehicleTable(doc) {
     const rows = [...doc.querySelectorAll('#vehicle_table tbody tr')];
@@ -218,7 +218,7 @@
     });
   }
 
-  // ─── Daten laden (gecacht) ──────────────────────────────────────────────────
+  // â”€â”€â”€ Daten laden (gecacht) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function loadVehicles() {
     if (vehicleCache) return Promise.resolve(vehicleCache);
@@ -235,7 +235,7 @@
   }
 
   async function loadData(panel) {
-    panel.innerHTML = `<p class="grisu-loading">⏳ Lade Fahrzeugdaten…</p>`;
+    panel.innerHTML = `<p class="grisu-loading">â³ Lade Fahrzeugdatenâ€¦</p>`;
     try {
       const vehicles = await loadVehicles();
       if (vehicles.length === 0) {
@@ -249,7 +249,7 @@
   }
 
   async function loadDataPerWache(panel) {
-    panel.innerHTML = `<p class="grisu-loading">⏳ Lade Fahrzeugdaten…</p>`;
+    panel.innerHTML = `<p class="grisu-loading">â³ Lade Fahrzeugdatenâ€¦</p>`;
     try {
       const vehicles = await loadVehicles();
       if (vehicles.length === 0) {
@@ -262,7 +262,7 @@
     }
   }
 
-  // ─── Tab 1: Tabelle rendern ─────────────────────────────────────────────────
+  // â”€â”€â”€ Tab 1: Tabelle rendern â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function renderTable(panel, vehicles) {
     let searchVal  = '';
@@ -313,14 +313,14 @@
       const countNotReady  = vehicles.filter(v => v.fmsCode === '6').length;
 
       let html = `
-        <input class="grisu-search" type="text" placeholder="🔍 Fahrzeug, Wache oder Typ suchen…" value="${escHtml(searchVal)}" id="${TAB_ID}-search">
+        <input class="grisu-search" type="text" placeholder="ðŸ” Fahrzeug, Wache oder Typ suchenâ€¦" value="${escHtml(searchVal)}" id="${TAB_ID}-search">
         <div class="grisu-filter-row">
           <span style="font-size:12px;color:#222;font-weight:700;margin-right:4px;">Filter:</span>
           <button class="grisu-btn-filter ${filterMode==='all'?'active':''}"      data-filter="all">Alle (${vehicles.length})</button>
-          <button class="grisu-btn-filter ${filterMode==='free'?'active':''}"     data-filter="free">🟢 Frei (${countFree})</button>
-          <button class="grisu-btn-filter ${filterMode==='busy'?'active':''}"     data-filter="busy">🟠 Im Einsatz (${countBusy})</button>
-          <button class="grisu-btn-filter ${filterMode==='sprech'?'active':''}"   data-filter="sprech">🔴 Sprechwunsch (${countSprech})</button>
-          <button class="grisu-btn-filter ${filterMode==='notready'?'active':''}" data-filter="notready">⚫ Nicht einsatzbereit (${countNotReady})</button>
+          <button class="grisu-btn-filter ${filterMode==='free'?'active':''}"     data-filter="free">ðŸŸ¢ Frei (${countFree})</button>
+          <button class="grisu-btn-filter ${filterMode==='busy'?'active':''}"     data-filter="busy">ðŸŸ  Im Einsatz (${countBusy})</button>
+          <button class="grisu-btn-filter ${filterMode==='sprech'?'active':''}"   data-filter="sprech">ðŸ”´ Sprechwunsch (${countSprech})</button>
+          <button class="grisu-btn-filter ${filterMode==='notready'?'active':''}" data-filter="notready">âš« Nicht einsatzbereit (${countNotReady})</button>
         </div>
         <div class="grisu-summary">${filtered.length} von ${vehicles.length} Fahrzeugen</div>
         <div class="grisu-table-wrap">
@@ -340,9 +340,9 @@
           <tr>
             <td class="grisu-col-wache">${v.buildingHref ? `<a class="grisu-link" href="${escHtml(v.buildingHref)}" target="_blank">${escHtml(v.buildingName)}</a>` : escHtml(v.buildingName)}</td>
             <td class="grisu-col-name">${v.vehicleId ? `<a class="grisu-link" href="/vehicles/${v.vehicleId}" target="_blank">${escHtml(v.name)}</a>` : escHtml(v.name)}</td>
-            <td>${escHtml(v.typeLabel || '–')}</td>
-            <td><span class="grisu-badge ${info.cls}">S${v.fmsCode || '?'} · ${escHtml(info.text)}</span></td>
-            <td style="text-align:center">${escHtml(v.crew || '–')}</td>
+            <td>${escHtml(v.typeLabel || 'â€“')}</td>
+            <td><span class="grisu-badge ${info.cls}">S${v.fmsCode || '?'} Â· ${escHtml(info.text)}</span></td>
+            <td style="text-align:center">${escHtml(v.crew || 'â€“')}</td>
           </tr>`;
       }
 
@@ -384,10 +384,10 @@
     render();
   }
 
-  // ─── Tab 2: Fahrzeuge pro Wache rendern ────────────────────────────────────
+  // â”€â”€â”€ Tab 2: Fahrzeuge pro Wache rendern â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-  // Vereinfacht Fahrzeugnamen für die Gruppierung:
-  // "BePol LA 0001 - DHuFüKw/1" -> "DHuFüKw"
+  // Vereinfacht Fahrzeugnamen fÃ¼r die Gruppierung:
+  // "BePol LA 0001 - DHuFÃ¼Kw/1" -> "DHuFÃ¼Kw"
   // (alles vor " - " sowie alles ab "/" wird ignoriert)
   function stripNumbering(name) {
     if (!name) return name;
@@ -416,7 +416,7 @@
     // Wachen alphabetisch sortieren
     const wacheNames = [...wachen.keys()].sort((a, b) => a.localeCompare(b, 'de'));
 
-    let html = `<div class="grisu-summary">${wacheNames.length} Wachen · ${vehicles.length} Fahrzeuge gesamt</div>`;
+    let html = `<div class="grisu-summary">${wacheNames.length} Wachen Â· ${vehicles.length} Fahrzeuge gesamt</div>`;
     html += `<div class="grisu-wache-grid">`;
 
     for (const wacheName of wacheNames) {
@@ -455,7 +455,7 @@
     panel.innerHTML = html;
   }
 
-  // ─── Initialisierung ───────────────────────────────────────────────────────
+  // â”€â”€â”€ Initialisierung â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function init() {
     if (!location.pathname.startsWith('/buildings/')) return;
