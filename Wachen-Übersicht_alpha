@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         LSS Leitstellen Wachen-Übersicht Version Alpha
+// @name         LSS Leitstellen Wachen-Übersicht mit status
 // @namespace    https://www.leitstellenspiel.de/
 // @version      2.2.0
-// @description  Zeigt in der Leitstelle einen Tab mit allen zugehörigen Wachen, deren Ausbauten, Personalstatus und Fahrzeug-Vollständigkeit
+// @description  Zeigt in der Leitstelle einen Tab mit allen zugehörigen Wachen, deren Ausbauten (inkl. Restzeit im Bau) und Personalstatus
 // @author       Grisu
 // @match        https://www.leitstellenspiel.de/buildings/*
 // @grant        GM_xmlhttpRequest
@@ -28,30 +28,6 @@
           try {
             const data = typeof r.response === 'object' ? r.response : JSON.parse(r.responseText);
             resolve(data);
-          } catch (e) { reject(e); }
-        },
-        onerror: reject,
-      });
-    });
-  }
-
-  // Lädt eine normale HTML-Gebäudeseite als parsbares Dokument
-  // (wird für "Fahrzeuge: X von maximal Y" benötigt, da das nicht
-  // in der /api/buildings/{id}-JSON-Antwort enthalten ist).
-  function fetchDoc(url) {
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url: LSS_BASE + url,
-        responseType: 'document',
-        onload: r => {
-          if (r.response && r.response.querySelector) {
-            resolve(r.response);
-            return;
-          }
-          try {
-            const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
-            resolve(doc);
           } catch (e) { reject(e); }
         },
         onerror: reject,
@@ -122,44 +98,60 @@
     return               { cls: 'badge-missing',  text: `${cur}/${tgt} ✗`,  title: `${tgt - cur} Personal fehlen` };
   }
 
-  // Fahrzeug-Vollständigkeit aus der Gebäude-HTML-Seite:
-  // "Fahrzeuge: X von maximal Y" (dt/dd-Paar), bei allen Wachentypen gleich aufgebaut.
-  function parseVehicleCounts(doc) {
-    const dts = [...doc.querySelectorAll('dt')];
-    const fzgDt = dts.find(dt => dt.textContent.trim().startsWith('Fahrzeuge:'));
-    if (!fzgDt) return { current: null, max: null };
-    const dd = fzgDt.nextElementSibling;
-    if (!dd) return { current: null, max: null };
-    const m = dd.textContent.match(/(\d+)\s+von\s+maximal\s+(\d+)/);
-    if (!m) return { current: null, max: null };
-    return { current: parseInt(m[1], 10), max: parseInt(m[2], 10) };
-  }
+  // ─── Ausbauten: Zeitstempel & Restzeit ─────────────────────────────────────
 
-  function getVehicleStatus(b) {
-    if (b.vehicle_current == null || b.vehicle_max == null) {
-      return { complete: false, known: false, text: '–' };
+  // available_at kann laut LSS-API-Changelog als ISO-String oder Unix-Zeitstempel
+  // (Sekunden) geliefert werden -> beide Fälle robust behandeln.
+  function parseTimestamp(ts) {
+    if (ts == null) return null;
+    if (typeof ts === 'number') {
+      const d = new Date(ts > 1e12 ? ts : ts * 1000);
+      return isNaN(d.getTime()) ? null : d;
     }
-    const complete = b.vehicle_max > 0 && b.vehicle_current >= b.vehicle_max;
-    return { complete, known: true, text: `${b.vehicle_current}/${b.vehicle_max}` };
+    const d = new Date(ts);
+    return isNaN(d.getTime()) ? null : d;
   }
 
-  // Ausbau-Badges: available / enabled
+  function formatRemaining(ms) {
+    if (ms <= 0) return 'gleich fertig';
+    const totalMin = Math.ceil(ms / 60000);
+    const days  = Math.floor(totalMin / 1440);
+    const hours = Math.floor((totalMin % 1440) / 60);
+    const mins  = totalMin % 60;
+    const parts = [];
+    if (days)  parts.push(`${days}t`);
+    if (hours) parts.push(`${hours}h`);
+    if (mins || parts.length === 0) parts.push(`${mins}m`);
+    return parts.join(' ');
+  }
+
+  // Ausbau-Badges: aktiv (grün) / inaktiv (rot) / im Bau mit Restzeit (grau) / nicht begonnen (grau)
   function getExtBadges(extensions) {
     if (!extensions || extensions.length === 0) {
       return `<span class="grisu-badge badge-noext">Keine Ausbauten</span>`;
     }
+    const now = Date.now();
     return [...extensions].sort((a, b) => (a.caption || '').localeCompare(b.caption || '', 'de')).map(ext => {
-      if (!ext.available) {
-        return `<span class="grisu-badge badge-missing" title="Nicht gebaut">✗ ${escHtml(ext.caption)}</span>`;
+      const caption = escHtml(ext.caption || '');
+
+      if (ext.available) {
+        if (ext.enabled) {
+          return `<span class="grisu-badge badge-active" title="Gebaut und aktiv">✓ ${caption}: aktiv</span>`;
+        }
+        return `<span class="grisu-badge badge-inactive" title="Gebaut, aber deaktiviert">✗ ${caption}: inaktiv</span>`;
       }
-      if (!ext.enabled) {
-        return `<span class="grisu-badge badge-partial" title="Deaktiviert">⏸ ${escHtml(ext.caption)}</span>`;
+
+      const finishDate = parseTimestamp(ext.available_at);
+      if (finishDate) {
+        const remainMs = finishDate.getTime() - now;
+        return `<span class="grisu-badge badge-building grisu-countdown-badge" data-available-at="${finishDate.toISOString()}" title="Fertig am ${finishDate.toLocaleString('de-DE')}">⏳ ${caption}: <span class="grisu-time">${formatRemaining(remainMs)}</span></span>`;
       }
-      return `<span class="grisu-badge badge-ok" title="Aktiv">✓ ${escHtml(ext.caption)}</span>`;
+
+      return `<span class="grisu-badge badge-notstarted" title="Noch nicht in Bau">— ${caption}: nicht begonnen</span>`;
     }).join('');
   }
 
-  // Problemscore: fehlende/deaktivierte Ausbauten + Unterbesetzung + fehlende Fahrzeuge
+  // Problemscore (nur noch intern für Filter genutzt, keine sichtbare Ampel mehr)
   function problemScore(b) {
     let score = 0;
     for (const ext of (b.extensions || [])) {
@@ -173,11 +165,24 @@
       if (ratio < 0.75) score += 3;
       else if (ratio < 1) score += 1;
     }
-    if (b.vehicle_current != null && b.vehicle_max != null && b.vehicle_max > 0 && b.vehicle_current < b.vehicle_max) {
-      score += 1;
-    }
     return score;
   }
+
+  // Aktualisiert alle sichtbaren Countdown-Badges, ohne die Tabelle neu zu rendern
+  // (damit Fokus/Cursor im Suchfeld nicht verloren geht).
+  function updateCountdowns() {
+    const panel = document.getElementById(TAB_ID + '-panel');
+    if (!panel) return;
+    const now = Date.now();
+    panel.querySelectorAll('.grisu-countdown-badge').forEach(el => {
+      const iso = el.dataset.availableAt;
+      if (!iso) return;
+      const finish = new Date(iso).getTime();
+      const timeEl = el.querySelector('.grisu-time');
+      if (timeEl) timeEl.textContent = formatRemaining(finish - now);
+    });
+  }
+  setInterval(updateCountdowns, 30000);
 
   // ─── CSS ───────────────────────────────────────────────────────────────────
 
@@ -236,7 +241,7 @@
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
-  min-width: 680px;
+  min-width: 600px;
 }
 #${TAB_ID}-panel table.grisu-tbl th {
   background: #e8e8e8 !important;
@@ -266,19 +271,21 @@
   font-weight: 600;
   white-space: nowrap;
 }
-#${TAB_ID}-panel .badge-ok      { background:#1e7e1e !important; color:#fff !important; border:1px solid #155715; }
-#${TAB_ID}-panel .badge-partial { background:#cc8800 !important; color:#fff !important; border:1px solid #996600; }
-#${TAB_ID}-panel .badge-missing { background:#cc2200 !important; color:#fff !important; border:1px solid #991a00; }
-#${TAB_ID}-panel .badge-none    { background:#555    !important; color:#fff !important; border:1px solid #333; }
-#${TAB_ID}-panel .badge-noext   { background:#888    !important; color:#fff !important; border:1px solid #666; }
+#${TAB_ID}-panel .badge-ok         { background:#1e7e1e !important; color:#fff !important; border:1px solid #155715; }
+#${TAB_ID}-panel .badge-partial    { background:#cc8800 !important; color:#fff !important; border:1px solid #996600; }
+#${TAB_ID}-panel .badge-missing    { background:#cc2200 !important; color:#fff !important; border:1px solid #991a00; }
+#${TAB_ID}-panel .badge-none       { background:#555    !important; color:#fff !important; border:1px solid #333; }
+#${TAB_ID}-panel .badge-noext      { background:#888    !important; color:#fff !important; border:1px solid #666; }
+#${TAB_ID}-panel .badge-active     { background:#1e7e1e !important; color:#fff !important; border:1px solid #155715; }
+#${TAB_ID}-panel .badge-inactive   { background:#cc2200 !important; color:#fff !important; border:1px solid #991a00; }
+#${TAB_ID}-panel .badge-building   { background:#555    !important; color:#fff !important; border:1px solid #333; }
+#${TAB_ID}-panel .badge-notstarted { background:#777    !important; color:#fff !important; border:1px solid #555; }
 #${TAB_ID}-panel .grisu-ext-list { display:flex; flex-wrap:wrap; gap:4px; }
 #${TAB_ID}-panel .grisu-loading  { padding:20px; color:#333 !important; text-align:center; }
 #${TAB_ID}-panel .grisu-error    { padding:20px; color:#cc2200 !important; font-weight:600; }
 #${TAB_ID}-panel .grisu-summary  { margin-bottom:10px; color:#333 !important; font-size:12px; }
 #${TAB_ID}-panel .grisu-link     { color:#66aaff !important; text-decoration:none; }
 #${TAB_ID}-panel .grisu-link:hover { text-decoration:underline; }
-/* Wachenname grün, wenn kein Fahrzeug mehr fehlt (Ist >= Maximal) */
-#${TAB_ID}-panel .grisu-link-vehok { color:#3ecf3e !important; font-weight:700; }
 #${TAB_ID}-panel .grisu-col-name { min-width:160px; }
 #${TAB_ID}-panel .grisu-col-type { min-width:130px; }
 #${TAB_ID}-panel .sort-asc::after  { content:' ▲'; font-size:10px; }
@@ -345,7 +352,7 @@
         return;
       }
 
-      // Gebäude-Details laden (vollständige extensions + Fahrzeug-Soll/Ist von der HTML-Seite)
+      // Gebäude-Details laden (vollständige extensions inkl. available_at)
       panel.innerHTML = `<p class="grisu-loading">⏳ Lade Details… (0/${assigned.length})</p>`;
       const BATCH = 10;
       const buildings = [];
@@ -354,15 +361,7 @@
         const batch = assigned.slice(i, i + BATCH);
         const details = await Promise.all(batch.map(async b => {
           try {
-            const [d, doc] = await Promise.all([
-              fetchJSON(`/api/buildings/${b.id}`),
-              fetchDoc(`/buildings/${b.id}`).catch(() => null),
-            ]);
-            if (doc) {
-              const vc = parseVehicleCounts(doc);
-              d.vehicle_current = vc.current;
-              d.vehicle_max = vc.max;
-            }
+            const d = await fetchJSON(`/api/buildings/${b.id}`);
             done++;
             const pEl = panel.querySelector('p');
             if (pEl) pEl.textContent = `⏳ Lade Details… (${done}/${assigned.length})`;
@@ -400,8 +399,6 @@
         const tgt = b.personal_count_target || 0;
         return tgt > 0 && cur < tgt;
       }
-      if (filterMode === 'missing-veh')  return getVehicleStatus(b).known && !getVehicleStatus(b).complete;
-      if (filterMode === 'veh-complete') return getVehicleStatus(b).known && getVehicleStatus(b).complete;
       if (filterMode === 'no-ext')       return (b.extensions || []).length === 0;
       return true;
     }
@@ -413,8 +410,6 @@
         else if (sortCol === 'type')     { va = a.building_type || 0;       vb = b.building_type || 0; }
         else if (sortCol === 'ext')      { va = (a.extensions || []).length; vb = (b.extensions || []).length; }
         else if (sortCol === 'personal') { va = a.personal_count || 0;      vb = b.personal_count || 0; }
-        else if (sortCol === 'vehicle')  { va = a.vehicle_current == null ? -1 : (a.vehicle_current - (a.vehicle_max || 0)); vb = b.vehicle_current == null ? -1 : (b.vehicle_current - (b.vehicle_max || 0)); }
-        else if (sortCol === 'problems') { va = problemScore(a);             vb = problemScore(b); }
         if (va < vb) return -sortDir;
         if (va > vb) return  sortDir;
         return 0;
@@ -435,8 +430,6 @@
         const tgt = b.personal_count_target || 0;
         return tgt > 0 && cur < tgt;
       }).length;
-      const totalVehMissing   = buildings.filter(b => getVehicleStatus(b).known && !getVehicleStatus(b).complete).length;
-      const totalVehComplete  = buildings.filter(b => getVehicleStatus(b).known && getVehicleStatus(b).complete).length;
 
       let html = `
         <input class="grisu-search" type="text" placeholder="🔍 Wache suchen…" value="${escHtml(searchVal)}" id="${TAB_ID}-search">
@@ -445,8 +438,6 @@
           <button class="grisu-btn-filter ${filterMode==='all'?'active':''}"          data-filter="all">Alle (${buildings.length})</button>
           <button class="grisu-btn-filter ${filterMode==='problems'?'active':''}"     data-filter="problems">⚠ Probleme (${totalProblems})</button>
           <button class="grisu-btn-filter ${filterMode==='understaffed'?'active':''}" data-filter="understaffed">👤 Unterbesetzt (${totalUnderstaffed})</button>
-          <button class="grisu-btn-filter ${filterMode==='missing-veh'?'active':''}"  data-filter="missing-veh">🚒 Fahrzeug fehlt (${totalVehMissing})</button>
-          <button class="grisu-btn-filter ${filterMode==='veh-complete'?'active':''}" data-filter="veh-complete">✅ Fahrzeuge komplett (${totalVehComplete})</button>
           <button class="grisu-btn-filter ${filterMode==='missing-ext'?'active':''}"  data-filter="missing-ext">✗ Ausbau fehlt</button>
           <button class="grisu-btn-filter ${filterMode==='no-ext'?'active':''}"       data-filter="no-ext">Keine Ausbauten</button>
         </div>
@@ -458,38 +449,19 @@
               <th class="grisu-col-type ${thCls('type')}"    data-col="type">Typ</th>
               <th class="${thCls('ext')}"                    data-col="ext">Ausbauten</th>
               <th class="${thCls('personal')}"               data-col="personal">Personal</th>
-              <th class="${thCls('vehicle')}"                data-col="vehicle">Fahrzeuge</th>
-              <th class="${thCls('problems')}"               data-col="problems">Status</th>
             </tr></thead>
             <tbody>`;
 
       for (const b of sorted) {
-        const name  = b.caption || `Gebäude #${b.id}`;
-        const score = problemScore(b);
-        const ps    = getPersonalStatus(b);
-        const vs    = getVehicleStatus(b);
-
-        let statusBadge;
-        if (score === 0)     statusBadge = `<span class="grisu-badge badge-ok">✓ OK</span>`;
-        else if (score <= 2) statusBadge = `<span class="grisu-badge badge-partial">⚠ ${score} Problem${score > 1 ? 'e' : ''}</span>`;
-        else                 statusBadge = `<span class="grisu-badge badge-missing">✗ ${score} Probleme</span>`;
-
-        const nameLinkCls = vs.known && vs.complete ? 'grisu-link grisu-link-vehok' : 'grisu-link';
-        const nameTitle    = vs.known ? (vs.complete ? 'Alle Fahrzeug-Stellplätze belegt' : `${vs.text} Fahrzeuge – es fehlen noch`) : '';
-
-        let vehBadge;
-        if (!vs.known) vehBadge = `<span class="grisu-badge badge-none">–</span>`;
-        else if (vs.complete) vehBadge = `<span class="grisu-badge badge-ok" title="Vollständig">${vs.text} ✓</span>`;
-        else vehBadge = `<span class="grisu-badge badge-missing" title="Fahrzeuge fehlen">${vs.text} ✗</span>`;
+        const name = b.caption || `Gebäude #${b.id}`;
+        const ps   = getPersonalStatus(b);
 
         html += `
           <tr>
-            <td class="grisu-col-name"><a class="${nameLinkCls}" href="/buildings/${b.id}" target="_blank" title="${escHtml(nameTitle)}">${escHtml(name)}</a></td>
+            <td class="grisu-col-name"><a class="grisu-link" href="/buildings/${b.id}" target="_blank">${escHtml(name)}</a></td>
             <td class="grisu-col-type">${escHtml(getBuildingTypeName(b.building_type))}</td>
             <td><div class="grisu-ext-list">${getExtBadges(b.extensions)}</div></td>
             <td style="text-align:center"><span class="grisu-badge ${ps.cls}" title="${escHtml(ps.title)}">${escHtml(ps.text)}</span></td>
-            <td style="text-align:center">${vehBadge}</td>
-            <td>${statusBadge}</td>
           </tr>`;
       }
 
