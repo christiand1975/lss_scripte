@@ -1,310 +1,161 @@
 // ==UserScript==
-// @name         LSS Verbandseinsatz-Entfernungsfilter BETA KOMPLETTUNGETESTET
-// @namespace    grisu118.lss
+// @name         LSS VB-Einsätze nach Wachen-Nähe filtern Beta
+// @namespace    Grisu-lss-tools
 // @version      1.0.0
-// @description  Blendet Verbandseinsätze aus, die weiter als eine einstellbare Distanz vom Referenzpunkt entfernt sind (z.B. Australien/Japan/Nahost ausblenden)
-// @author       Grisu118
+// @description  Blendet Verbandseinsätze aus, deren nächste eigene Wache weiter als eine einstellbare Distanz entfernt ist. Dropdown erscheint direkt über der Verbandseinsatzliste.
 // @match        https://www.leitstellenspiel.de/*
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_registerMenuCommand
+// @grant        none
 // @run-at       document-idle
 // ==/UserScript==
 
 (function () {
-    'use strict';
+  'use strict';
 
-    // ---------------------------------------------------------------
-    // Konfiguration
-    // ---------------------------------------------------------------
-    const KEY_MAX_KM = 'vbFilter_maxKm';
-    const KEY_MAX_KM_MANUAL_OVERRIDE = 'vbFilter_manualOverride'; // true = ignoriert Spieleinstellung
-    const KEY_REF = 'vbFilter_refPoint'; // {lat, lng}
-    const EARTH_RADIUS_KM = 6371;
+  const STORAGE_KEY = 'lssVbNaeheFilter_maxDistanceKm';
+  const ALLIANCE_LIST_ID = 'mission_list_alliance';
 
-    // Bestätigt: globales User-Feld (Rails-Attribut alliance_mission_distance
-    // am User-Model), <select>, kein Leitstellen-Feld. Leerer Wert ("") = "Keine Grenze".
-    const SETTINGS_SELECT_SELECTOR = '#user_alliance_mission_distance';
+  // Auswahlmöglichkeiten im Dropdown (km). null = keine Grenze.
+  const DISTANCE_OPTIONS = [0, 100, 200, 300, 400, 500, null];
 
-    const SETTINGS_PAGE_URL = '/settings/index';
+  function getSavedDistance() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw === null || raw === 'null') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
 
-    const SETTINGS_CACHE_KEY = 'vbFilter_gameSettingCache';
-    const SETTINGS_CACHE_TTL_MS = 60 * 60 * 1000; // 1h
+  function saveDistance(value) {
+    localStorage.setItem(STORAGE_KEY, value === null ? 'null' : String(value));
+  }
 
-    const CONTAINER_IDS = [
-        'mission_list_alliance',
-        'mission_list_alliance_event',
-        'mission_list_sicherheitswache',
-    ];
+  function haversineKm(lat1, lng1, lat2, lng2) {
+    const R = 6371;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLng = ((lng2 - lng1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
 
-    let maxDistanceKm = GM_getValue(KEY_MAX_KM, 600);
-    let manualOverride = GM_getValue(KEY_MAX_KM_MANUAL_OVERRIDE, false);
-    let refPoint = GM_getValue(KEY_REF, null); // {lat, lng} oder null
+  // Eigene Wachen-Koordinaten einmal einsammeln (buildings_data enthält nur
+  // eigene Gebäude, siehe vorherige Analyse)
+  function getOwnWachenCoords() {
+    if (typeof buildings_data === 'undefined') return [];
+    return Array.from(buildings_data.values())
+      .filter((b) => b.latitude != null && b.longitude != null)
+      .map((b) => ({ lat: b.latitude, lng: b.longitude }));
+  }
 
-    // ---------------------------------------------------------------
-    // Spieleinstellung auslesen: "Maximale Entfernung von
-    // Verbandseinsätzen" aus dem Einstellungen-Tab der aktuell
-    // geöffneten Leitstelle. Läuft nur einmal beim Start, kein Polling.
-    // Wenn nicht gefunden -> Fallback auf zuletzt bekannten/manuellen Wert.
-    // ---------------------------------------------------------------
-    // Extrahiert den ausgewählten Wert aus einem <select id="user_alliance_mission_distance">
-    // innerhalb des übergebenen Documents. "" (Keine Grenze) -> Infinity.
-    function extractDistanceFromDoc(doc) {
-        const select = doc.querySelector(SETTINGS_SELECT_SELECTOR);
-        if (!select) return undefined; // nicht gefunden
-        const selected = select.querySelector('option[selected]') || select.options[select.selectedIndex];
-        if (!selected) return undefined;
-        const raw = selected.value;
-        if (raw === '') return Infinity; // "Keine Grenze"
-        const parsed = parseInt(raw, 10);
-        return Number.isNaN(parsed) ? undefined : parsed;
+  function distanceToNearestWache(lat, lng, wachen) {
+    let min = Infinity;
+    for (const w of wachen) {
+      const d = haversineKm(lat, lng, w.lat, w.lng);
+      if (d < min) min = d;
     }
+    return min;
+  }
 
-    function readGameConfiguredDistanceFromCurrentPage() {
-        return extractDistanceFromDoc(document);
+  function applyFilter() {
+    const maxDistance = getSavedDistance();
+    const container = document.getElementById(ALLIANCE_LIST_ID);
+    if (!container || typeof missions_data === 'undefined') return;
+
+    const wachen = getOwnWachenCoords();
+    if (wachen.length === 0) return; // keine eigenen Wachen bekannt -> nichts filtern
+
+    container.querySelectorAll('[id^="mission_panel_heading_"]').forEach((heading) => {
+      const id = Number(heading.id.replace('mission_panel_heading_', ''));
+      const panel = heading.closest('.panel') || heading.parentElement;
+      if (!panel) return;
+
+      if (maxDistance === null) {
+        panel.style.display = '';
+        return;
+      }
+
+      const mission = missions_data.get(id);
+      if (!mission || mission.latitude == null || mission.longitude == null) {
+        panel.style.display = '';
+        return;
+      }
+
+      const distance = distanceToNearestWache(mission.latitude, mission.longitude, wachen);
+      panel.style.display = distance <= maxDistance ? '' : 'none';
+    });
+  }
+
+  function buildDropdown() {
+    const wrapper = document.createElement('div');
+    wrapper.id = 'lssVbNaeheFilterWrapper';
+    wrapper.style.padding = '4px 8px';
+    wrapper.style.display = 'flex';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.gap = '6px';
+
+    const label = document.createElement('label');
+    label.textContent = 'Max. Entfernung zur nächsten eigenen Wache:';
+    label.style.fontSize = '12px';
+    label.setAttribute('for', 'lssVbNaeheFilterSelect');
+
+    const select = document.createElement('select');
+    select.id = 'lssVbNaeheFilterSelect';
+    select.className = 'form-control input-sm';
+    select.style.width = 'auto';
+    select.style.display = 'inline-block';
+
+    DISTANCE_OPTIONS.forEach((km) => {
+      const opt = document.createElement('option');
+      opt.value = km === null ? 'null' : String(km);
+      opt.textContent = km === null ? 'Keine Grenze' : `${km} km`;
+      select.appendChild(opt);
+    });
+
+    const current = getSavedDistance();
+    select.value = current === null ? 'null' : String(current);
+
+    select.addEventListener('change', () => {
+      const val = select.value === 'null' ? null : Number(select.value);
+      saveDistance(val);
+      applyFilter();
+    });
+
+    wrapper.appendChild(label);
+    wrapper.appendChild(select);
+    return wrapper;
+  }
+
+  function ensureDropdown() {
+    if (document.getElementById('lssVbNaeheFilterWrapper')) return;
+    const container = document.getElementById(ALLIANCE_LIST_ID);
+    if (!container || !container.parentElement) return;
+    container.parentElement.insertBefore(buildDropdown(), container);
+  }
+
+  let debounceTimer = null;
+  function scheduleUpdate() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      ensureDropdown();
+      applyFilter();
+    }, 400);
+  }
+
+  function init() {
+    ensureDropdown();
+    applyFilter();
+
+    const container = document.getElementById(ALLIANCE_LIST_ID);
+    if (container) {
+      const observer = new MutationObserver(scheduleUpdate);
+      observer.observe(container, { childList: true, subtree: true });
     }
+  }
 
-    async function fetchGameConfiguredDistance() {
-        // Cache zuerst prüfen (vermeidet unnötige Requests, TTL-basiert)
-        const cached = GM_getValue(SETTINGS_CACHE_KEY, null);
-        if (cached && Date.now() - cached.ts < SETTINGS_CACHE_TTL_MS) {
-            return cached.value;
-        }
+  init();
 
-        try {
-            const res = await fetch(SETTINGS_PAGE_URL, { credentials: 'same-origin' });
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            const html = await res.text();
-            const doc = new DOMParser().parseFromString(html, 'text/html');
-            const value = extractDistanceFromDoc(doc);
-            if (value !== undefined) {
-                GM_setValue(SETTINGS_CACHE_KEY, { ts: Date.now(), value });
-                return value;
-            }
-        } catch (e) {
-            console.warn('[VB-Filter] Konnte Spieleinstellung nicht per Fetch laden:', e);
-        }
-        return undefined;
-    }
-
-    async function syncMaxDistanceFromGame() {
-        if (manualOverride) return; // Spieler hat bewusst eigenen Wert gesetzt
-
-        // 1) Falls das Select zufällig auf der aktuellen Seite liegt, direkt nehmen
-        let fromGame = readGameConfiguredDistanceFromCurrentPage();
-
-        // 2) Sonst per (gecachtem) Hintergrund-Fetch der Einstellungsseite holen
-        if (fromGame === undefined) {
-            fromGame = await fetchGameConfiguredDistance();
-        }
-
-        if (fromGame === undefined) {
-            console.warn(
-                '[VB-Filter] Konnte "Maximale Entfernung von Verbandseinsätzen" nicht ermitteln. ' +
-                    'Nutze zuletzt bekannten Wert (' + maxDistanceKm + ' km). ' +
-                    'Bitte SETTINGS_PAGE_URL prüfen/anpassen.'
-            );
-            return;
-        }
-
-        if (fromGame !== maxDistanceKm) {
-            maxDistanceKm = fromGame;
-            GM_setValue(KEY_MAX_KM, maxDistanceKm);
-            console.info(
-                '[VB-Filter] Entfernung aus Spieleinstellung übernommen:',
-                fromGame === Infinity ? 'Keine Grenze' : fromGame + ' km'
-            );
-            applyToAllVisibleEntries();
-        }
-    }
-
-    // missionId (number) -> Distanz in km
-    const distanceCache = new Map();
-
-    // ---------------------------------------------------------------
-    // Hilfsfunktionen
-    // ---------------------------------------------------------------
-    function haversineKm(lat1, lon1, lat2, lon2) {
-        const toRad = (d) => (d * Math.PI) / 180;
-        const dLat = toRad(lat2 - lat1);
-        const dLon = toRad(lon2 - lon1);
-        const a =
-            Math.sin(dLat / 2) ** 2 +
-            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-        return EARTH_RADIUS_KM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    }
-
-    function ensureRefPoint() {
-        if (refPoint) return refPoint;
-        if (window.map && typeof window.map.getCenter === 'function') {
-            const c = window.map.getCenter();
-            refPoint = { lat: c.lat, lng: c.lng };
-            GM_setValue(KEY_REF, refPoint);
-            console.info('[VB-Filter] Referenzpunkt automatisch gesetzt:', refPoint);
-        }
-        return refPoint;
-    }
-
-    function findEntry(missionId) {
-        return document.querySelector(`.missionSideBarEntry[mission_id="${missionId}"]`);
-    }
-
-    function applyFilterToEntry(entry, missionId) {
-        if (!distanceCache.has(missionId)) return;
-        const km = distanceCache.get(missionId);
-        const shouldHide = km > maxDistanceKm;
-
-        if (shouldHide && entry.style.display !== 'none') {
-            entry.style.display = 'none';
-            entry.dataset.vbFiltered = '1';
-        } else if (!shouldHide && entry.dataset.vbFiltered) {
-            entry.style.display = '';
-            delete entry.dataset.vbFiltered;
-        }
-        // optional: Tooltip mit Distanz zur Kontrolle
-        if (!entry.dataset.vbTitleSet) {
-            entry.title = (entry.title ? entry.title + ' | ' : '') + `Entfernung: ${km.toFixed(0)} km`;
-            entry.dataset.vbTitleSet = '1';
-        }
-    }
-
-    function applyToAllVisibleEntries() {
-        const selector = CONTAINER_IDS.map((id) => `#${id} > .missionSideBarEntry`).join(',');
-        document.querySelectorAll(selector).forEach((entry) => {
-            const id = parseInt(entry.getAttribute('mission_id'), 10);
-            if (!Number.isNaN(id)) applyFilterToEntry(entry, id);
-        });
-    }
-
-    // ---------------------------------------------------------------
-    // Distanzberechnung: wird pro Einsatz einmalig getriggert,
-    // sobald das Spiel den Marker auf der Karte anlegt.
-    // ---------------------------------------------------------------
-    function computeAndCache(missionEvent) {
-        const ref = ensureRefPoint();
-        if (!ref) return; // Karte evtl. noch nicht bereit -> beim nächsten Mission-Add erneut versucht
-
-        const id = missionEvent && (missionEvent.id ?? missionEvent.mission_id);
-        if (id == null) return;
-
-        let latlng = null;
-        const marker = window.mission_marker && window.mission_marker[id];
-        if (marker && typeof marker.getLatLng === 'function') {
-            latlng = marker.getLatLng();
-        } else if (missionEvent.lat != null && missionEvent.lng != null) {
-            latlng = { lat: missionEvent.lat, lng: missionEvent.lng };
-        }
-        if (!latlng) return;
-
-        const km = haversineKm(ref.lat, ref.lng, latlng.lat, latlng.lng);
-        distanceCache.set(id, km);
-
-        const entry = findEntry(id);
-        if (entry) applyFilterToEntry(entry, id);
-    }
-
-    function hookMissionMarkerAdd() {
-        if (typeof window.missionMarkerAdd !== 'function') {
-            // Spielskripte evtl. noch nicht geladen -> kurz später erneut versuchen
-            setTimeout(hookMissionMarkerAdd, 500);
-            return;
-        }
-        const original = window.missionMarkerAdd;
-        window.missionMarkerAdd = function (mission) {
-            const result = original.apply(this, arguments);
-            try {
-                computeAndCache(mission);
-            } catch (e) {
-                console.warn('[VB-Filter] Distanzberechnung fehlgeschlagen', e);
-            }
-            return result;
-        };
-        console.info('[VB-Filter] missionMarkerAdd erfolgreich gehookt.');
-    }
-
-    // ---------------------------------------------------------------
-    // MutationObserver: reagiert nur auf tatsächliche DOM-Änderungen
-    // in den drei Listen-Containern, kein Polling. Mehrere Mutations
-    // (z.B. beim initialen Laden vieler Einsätze) werden per
-    // requestAnimationFrame zu einem einzigen Durchlauf gebündelt,
-    // damit die Performance nicht von der Anzahl der Events abhängt.
-    // ---------------------------------------------------------------
-    function setupObserver() {
-        let frameScheduled = false;
-        const scheduleApply = () => {
-            if (frameScheduled) return;
-            frameScheduled = true;
-            requestAnimationFrame(() => {
-                applyToAllVisibleEntries();
-                frameScheduled = false;
-            });
-        };
-
-        const observer = new MutationObserver((mutations) => {
-            // Nur reagieren, wenn tatsächlich Knoten hinzugefügt wurden
-            if (mutations.some((m) => m.addedNodes.length > 0)) {
-                scheduleApply();
-            }
-        });
-
-        let attached = 0;
-        CONTAINER_IDS.forEach((id) => {
-            const el = document.getElementById(id);
-            if (el) {
-                observer.observe(el, { childList: true });
-                attached++;
-            }
-        });
-
-        if (attached === 0) {
-            // Container evtl. noch nicht im DOM (z.B. andere Seite) -> später erneut versuchen
-            setTimeout(setupObserver, 1000);
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // Menü / Einstellungen
-    // ---------------------------------------------------------------
-    if (typeof GM_registerMenuCommand === 'function') {
-        GM_registerMenuCommand('VB-Filter: Max. Entfernung manuell setzen', () => {
-            const input = prompt('Maximale Entfernung für Verbandseinsätze (km):', maxDistanceKm);
-            const parsed = parseInt(input, 10);
-            if (!Number.isNaN(parsed)) {
-                maxDistanceKm = parsed;
-                manualOverride = true;
-                GM_setValue(KEY_MAX_KM, maxDistanceKm);
-                GM_setValue(KEY_MAX_KM_MANUAL_OVERRIDE, true);
-                applyToAllVisibleEntries();
-            }
-        });
-
-        GM_registerMenuCommand('VB-Filter: Zurück auf Spieleinstellung (automatisch)', () => {
-            manualOverride = false;
-            GM_setValue(KEY_MAX_KM_MANUAL_OVERRIDE, false);
-            GM_setValue(SETTINGS_CACHE_KEY, null); // Cache verwerfen, damit sofort neu geladen wird
-            syncMaxDistanceFromGame();
-        });
-
-        GM_registerMenuCommand('VB-Filter: Referenzpunkt = aktueller Kartenmittelpunkt', () => {
-            if (window.map && typeof window.map.getCenter === 'function') {
-                const c = window.map.getCenter();
-                refPoint = { lat: c.lat, lng: c.lng };
-                GM_setValue(KEY_REF, refPoint);
-                distanceCache.clear();
-                applyToAllVisibleEntries();
-                alert(`Referenzpunkt gesetzt: ${c.lat.toFixed(3)}, ${c.lng.toFixed(3)}`);
-            } else {
-                alert('Karte nicht gefunden - bitte auf einer Seite mit Karte ausführen.');
-            }
-        });
-    }
-
-    // ---------------------------------------------------------------
-    // Start
-    // ---------------------------------------------------------------
-    hookMissionMarkerAdd();
-    setupObserver();
-    syncMaxDistanceFromGame();
-    // Für Einsätze, die schon vor dem Laden des Scripts auf der Karte waren
-    setTimeout(applyToAllVisibleEntries, 1500);
+  // Für manuelle Tests in der Konsole
+  window.lssVbNaeheFilter = { applyFilter, getSavedDistance, saveDistance };
 })();
